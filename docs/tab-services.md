@@ -35,7 +35,7 @@ The **+** button in the filter bar creates a service without needing a route fir
 
 | Type          | Backends                                                              |
 | ---------------| -----------------------------------------------------------------------|
-| Load Balancer | A list of addresses, each with its scheme                             |
+| Load Balancer | A list of addresses, each with its scheme: `HTTP`, `HTTPS` or `h2c`  |
 | Weighted      | Rows that are each an IP:Port or an existing service, split by weight |
 | Mirroring     | The first row serves; the rest receive a copy by percentage           |
 | Failover      | The first row serves; the second takes over if it fails               |

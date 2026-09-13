@@ -5038,6 +5038,9 @@ def _clean_duration(value):
     return v if re.match(r'^(\d+(ms|s|m|h))+$', v) else ''
 
 
+_SCHEME_IN_HOST = re.compile(r'^(https?|h2c)://', re.I)
+
+
 def _backend_servers(rows, key, scheme_default='http'):
     servers = []
     for row in rows if isinstance(rows, list) else []:
@@ -5048,7 +5051,7 @@ def _backend_servers(rows, key, scheme_default='http'):
             continue
         port = str(row.get('port') or '').strip()
         if key == 'url':
-            if host.startswith('http://') or host.startswith('https://'):
+            if _SCHEME_IN_HOST.match(host):
                 servers.append({'url': host})
             else:
                 scheme = str(row.get('scheme') or scheme_default).strip() or scheme_default

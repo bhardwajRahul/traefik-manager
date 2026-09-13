@@ -117,9 +117,11 @@ from `manager.yml` and restart.
 | `WEB_CONCURRENCY` | `2` | - | Worker processes. Each costs about 50 MB. Raise for more fault isolation, not for speed |
 | `GUNICORN_THREADS` | `4` | - | Requests served at once per worker. Traefik Manager spends most of its time waiting on Traefik and on agents, so threads are what make pages load in parallel. `WEB_CONCURRENCY x GUNICORN_THREADS` is the total |
 | `GUNICORN_TIMEOUT` | `60` | - | Seconds before the supervisor restarts a worker that has stopped responding. A restart drops every request that worker is handling, so leave room above the 15 second agent timeout |
+| `GUNICORN_GRACEFUL_TIMEOUT` | `30` | - | Seconds a worker is given to finish in-flight requests when asked to stop |
 | `GUNICORN_KEEPALIVE` | `5` | - | Seconds an idle connection is held open |
 | `GUNICORN_WORKER_CONNECTIONS` | `200` | - | Connections a worker will accept before new ones wait in the kernel backlog |
 | `GUNICORN_LOG_LEVEL` | `info` | - | Gunicorn's own log level |
+| `GUNICORN_BIND` | `0.0.0.0:5000` | - | Address the server binds inside the container. Change the published port in your compose file instead |
 | `BASE_PATH` | _(none)_ | - | Serve Traefik Manager under a sub path, for example `/traefik-manager` |
 | `LOG_LEVEL` | `INFO` | - | Python log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 

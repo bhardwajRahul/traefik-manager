@@ -71,7 +71,7 @@ Open **http://your-server:5000** and the setup wizard takes it from there.
 
 ## Features
 
-**Routes** - HTTP, TCP and UDP. Multiple domains and backends per route, sticky sessions, health checks, priority, per-route certificate resolvers, wildcard certificates and TLS profiles. Guided presets for security headers and media streaming.
+**Routes** - HTTP, TCP and UDP. Multiple domains and backends per route, each with its own scheme including `h2c` for cleartext HTTP/2, sticky sessions, health checks, priority, per-route certificate resolvers, editable `tls.domains` and TLS profiles. Guided presets for security headers and media streaming.
 
 **Services** - build a load balancer, weighted, mirroring or failover service on its own, or balance a route across a mix of raw addresses and existing services with a weight on each row. Services Traefik Manager did not write stay read only until you take them over, which records ownership without touching the file.
 
@@ -79,7 +79,9 @@ Open **http://your-server:5000** and the setup wizard takes it from there.
 
 **Dashboard and Route Map** - a homepage-style grid of your apps with icons and health, and a topology map from entry point through middlewares to backend, coloured per hop.
 
-**Monitoring** - live router and service health from the Traefik API, provider tabs for Docker, Kubernetes, Swarm, Nomad, ECS, Consul, Redis and more, TLS expiry tracking, and CVE advisories for your running Traefik version.
+**Certificates** - every certificate in `acme.json`, with expiry, the ones no router serves, and the ones whose resolver is gone from your static config. Filter by domain or by either of those. Mount the file read-write and set a restart method to remove them, one at a time or in bulk, with a timestamped backup you can restore.
+
+**Monitoring** - live router and service health from the Traefik API, provider tabs for Docker, Kubernetes, Swarm, Nomad, ECS, Consul, Redis and more, which switch themselves on the first time Traefik reports routers from them, and CVE advisories for your running Traefik version.
 
 **Logs and CrowdSec** - access log analytics and CrowdSec attacks, bans and decisions. Optional country flags and a world map, resolved on your own server.
 

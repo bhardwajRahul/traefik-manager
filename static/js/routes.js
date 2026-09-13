@@ -1532,7 +1532,7 @@ function addBackendRow(proto, data) {
     row.className = 'tm-backend-row grid gap-3 mt-2';
     row.style.gridTemplateColumns = proto === 'http' ? '110px 1fr 1fr 32px' : '1fr 1fr 32px';
     const schemeCell = proto === 'http'
-        ? `<select class="input-field bk-scheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select>`
+        ? `<select class="input-field bk-scheme"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="h2c">h2c</option></select>`
         : '';
     const kindCell = proto === 'http'
         ? `<select class="input-field bk-kind text-sm" onchange="_bkKindChanged(this)"><option value="manual">IP : Port</option><option value="service">Service</option></select>`
@@ -1567,12 +1567,23 @@ function _clearBackendRows(proto) {
     if (wrap) wrap.innerHTML = '';
 }
 
+const _SCHEME_RE = /^(https?|h2c):\/\//i;
+
+function _schemeOf(url) {
+    const m = String(url || '').match(_SCHEME_RE);
+    return m ? m[1].toLowerCase() : 'http';
+}
+
+function _stripScheme(url) {
+    return String(url || '').replace(_SCHEME_RE, '');
+}
+
 function _splitServer(value, proto) {
     let v = String(value || '').trim();
     if (!v) return null;
     if (proto === 'http') {
-        const scheme = v.startsWith('https://') ? 'https' : 'http';
-        v = v.replace(/^https?:\/\//, '');
+        const scheme = _schemeOf(v);
+        v = v.replace(_SCHEME_RE, '');
         const i = v.lastIndexOf(':');
         return (i > -1 && !v.slice(i + 1).includes('/'))
             ? { scheme, host: v.slice(0, i), port: v.slice(i + 1) }
@@ -1823,8 +1834,8 @@ async function cloneRoute(btn) {
     if (proto === 'http') {
         _applyHttpRuleToForm(app.rule || '');
         const _cloneComposite = !!app.serviceType && app.serviceType !== 'loadBalancer';
-        const targetScheme = (app.target || '').startsWith('https://') ? 'https' : 'http';
-        let target = _cloneComposite ? '' : (app.target || '').replace('http://','').replace('https://','');
+        const targetScheme = _schemeOf(app.target);
+        let target = _cloneComposite ? '' : _stripScheme(app.target);
         const parts = target.split(':');
         document.getElementById('targetIp').value = parts[0] || '';
         document.getElementById('targetPort').value = _cloneComposite ? '' : (parts[1] || '80');
@@ -1930,8 +1941,8 @@ async function handleEdit(btn) {
 
     if (proto === 'http') {
         _applyHttpRuleToForm(app.rule || '');
-        const targetScheme = (app.target || '').startsWith('https://') ? 'https' : 'http';
-        let target = app.target.replace('http://','').replace('https://','');
+        const targetScheme = _schemeOf(app.target);
+        let target = _stripScheme(app.target);
         const parts = target.split(':');
         document.getElementById('targetIp').value = parts[0];
         document.getElementById('targetPort').value = parts[1] || '80';

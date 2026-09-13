@@ -677,7 +677,7 @@ async function addServiceRow(data) {
     row.id = id;
     row.innerHTML =
         `<select class="input-field svc-kind text-sm" onchange="_svcRowKindChanged(this)"><option value="manual">IP : Port</option><option value="service">Service</option></select>`
-        + `<select class="input-field svc-scheme text-sm"><option value="http">HTTP</option><option value="https">HTTPS</option></select>`
+        + `<select class="input-field svc-scheme text-sm"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="h2c">h2c</option></select>`
         + `<input type="text" class="input-field svc-addr text-sm" placeholder="10.0.0.10:80">`
         + `<select class="input-field svc-ref text-sm" style="display:none"></select>`
         + `<input type="number" class="input-field svc-weight text-sm" value="1" min="0" title="Weight">`
@@ -787,11 +787,14 @@ function _compositeTypeOf(s) {
     return s.weighted ? 'weighted' : s.mirroring ? 'mirroring' : s.failover ? 'failover' : '';
 }
 
+const _SVC_SCHEME_RE = /^(https?|h2c):\/\//i;
+
 function _svcUrlToRow(url) {
     const u = String(url || '');
+    const m = u.match(_SVC_SCHEME_RE);
     return { kind: 'manual',
-             scheme: u.startsWith('https://') ? 'https' : 'http',
-             address: u.replace(/^https?:\/\//, '') };
+             scheme: m ? m[1].toLowerCase() : 'http',
+             address: u.replace(_SVC_SCHEME_RE, '') };
 }
 
 function _svcChildToRow(label) {
