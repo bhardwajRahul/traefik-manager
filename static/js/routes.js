@@ -1000,7 +1000,7 @@ function renderRouteGrid(apps) {
     const _allAppsForRender = apps;
     const _tmOn = _routeViewMode !== 'list';
     const _tmCfShow = _tmOn ? _tmFolderMode(apps) : false;
-    grid.innerHTML = apps.map((app, i) => {
+    const _rowsHtml = apps.map((app, i) => {
         if (_tmOn) return _tmRouteCard(app, i, { showCf: _tmCfShow });
         const proto = app.protocol || 'http';
         const allDomains = [...(app.rule || '').matchAll(/Host\(`([^`]+)`\)/g)].map(m => m[1]);
@@ -1058,11 +1058,13 @@ function renderRouteGrid(apps) {
     if (_routeViewMode === 'list') {
         const header = `<div class="svc-list-header route-list-grid"><div>Status</div><div>Protocol</div><div>Name</div><div>Service</div><div>Domain / Rule</div><div>Target</div><div>Entry Points</div><div>Middlewares</div><div class="rl-actions-head">Actions</div></div>`;
         grid.className = '';
-        grid.innerHTML = `<div class="svc-list">${header}${grid.innerHTML}</div>`;
+        grid.innerHTML = `<div class="svc-list">${header}${_rowsHtml}</div>`;
     } else if (_tmOn) {
         grid.className = 'tm-card-grid';
+        grid.innerHTML = _rowsHtml;
     } else {
         grid.className = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4';
+        grid.innerHTML = _rowsHtml;
     }
     _routeCardEls = Array.from(grid.querySelectorAll('.route-card'));
     if (typeof _sdApplyRouteCards === 'function') _sdApplyRouteCards();
@@ -2101,7 +2103,8 @@ function toggleRouteView() {
     tmSetPref('routeViewMode', _routeViewMode);
     const icon = document.getElementById('routeViewIcon');
     if (icon) icon.className = _routeViewMode === 'grid' ? 'ph-bold ph-list' : 'ph-bold ph-squares-four';
-    refreshRoutes();
+    if (window._lastRenderedApps) renderRouteGrid(window._lastRenderedApps);
+    else refreshRoutes();
 }
 
 
