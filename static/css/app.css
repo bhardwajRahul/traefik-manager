@@ -453,8 +453,6 @@ html.tm-compact-stats .sig-root .atk-feed .sig-ep-kind { padding-left: 0; }
     .sig-root .atk-decs .sig-ep-n { text-align: left; }
 }
 
-.sig-root .sig-compact .atk-feed .atk-open,
-html.tm-compact-stats .sig-root .atk-feed .atk-open { display: none; }
 .sig-root .sig-compact .atk-page,
 html.tm-compact-stats .sig-root .atk-page { font-size: 10px; padding-top: 6px; }
 
