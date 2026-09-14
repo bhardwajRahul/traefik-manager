@@ -133,6 +133,21 @@ From 1.13.0 the tab also authors them. **+** builds a load balancer, weighted, m
 
 Works against the host or any agent. A service written to an agent lives in that agent's config files and is managed independently, so the same name can exist on both.
 
+### Providers
+
+One read-only page per provider, shown in the drawer under Providers when its tab is on for the selected server. Tabs turn on by themselves the first time Traefik reports the provider, on the host and on each agent, and are switched in Settings like any other tab.
+
+| Page | Lists routers from |
+|---|---|
+| Docker, Swarm, Nomad, ECS, Consul Catalog | That provider |
+| Kubernetes | Kubernetes CRD, Ingress and Gateway API |
+| Redis, etcd, Consul KV, ZooKeeper | That KV store |
+| HTTP Provider | Traefik's HTTP provider |
+| File (external) | File provider configs Traefik Manager does not manage |
+| Internal | Traefik itself: dashboard, API, ping |
+
+Each page shows how many routes are live or not serving, search, a protocol filter, the route cards with their target, the provider's middlewares, and a detail sheet per route.
+
 ### Logs
 
 The access log as analytics rather than a wall of text, mirroring the web app. Seven cards - status codes, response time, methods, domains, paths, clients and services - each with counts you can tap to filter the list. A **Where it fails** panel names the worst status-and-path pairs. Tap any entry for its full detail.
