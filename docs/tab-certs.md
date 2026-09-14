@@ -139,7 +139,7 @@ The trade-offs are covered in full under [Static config](static.md#restart-metho
 
 Each ACME certificate then gets a remove button. The selection button in the toolbar turns on checkboxes for removing several at once, with **Select unused** for the common case. A whole batch costs one Traefik restart.
 
-Removing takes a timestamped backup of `acme.json` first, edits the file in place so a bind mount stays attached, keeps the mode at `600`, leaves the ACME account untouched, and restarts Traefik. Deleting a route offers to remove its certificate at the same time, when no other route still needs it.
+Removing takes a timestamped backup of `acme.json` first, edits the file in place so a bind mount stays attached, keeps the mode at `600`, leaves the ACME account untouched, and restarts Traefik. Every store is checked before any is changed. If Traefik rewrites the file while a removal is in progress, nothing is written and you are asked to try again. Deleting a route offers to remove its certificate at the same time, when no other route still needs it.
 
 ::: warning Deleting a certificate a route still needs re-issues it
 Traefik requests a fresh certificate for any domain a router still serves. Let's Encrypt allows five identical certificates per week, so repeated removals of the same domains can lock you out until that window clears.

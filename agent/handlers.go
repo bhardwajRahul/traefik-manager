@@ -2461,6 +2461,16 @@ type certDeleteBody struct {
 	} `json:"certs"`
 }
 
+var acmeMu sync.Mutex
+
+const acmeAttempts = 3
+
+type acmeChangedError struct{ name string }
+
+func (e acmeChangedError) Error() string {
+	return e.name + " changed while it was being edited, most likely Traefik renewing a certificate. Nothing was written, try again."
+}
+
 func (a *App) certsDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	var body certDeleteBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Certs) == 0 {
@@ -2483,16 +2493,48 @@ func (a *App) certsDeleteHandler(w http.ResponseWriter, r *http.Request) {
 			wanted[c.Resolver+"\x00"+c.Main] = true
 		}
 	}
-	removed := 0
-	saved := ""
+	acmeMu.Lock()
+	defer acmeMu.Unlock()
 	for _, path := range paths {
 		if !acmeWritable(path) {
-			jsonError(w, "acme.json is mounted read only on this agent", http.StatusForbidden)
+			jsonError(w, filepath.Base(path)+" is mounted read only on this agent, nothing was changed", http.StatusForbidden)
 			return
 		}
-		count, bak, err := acmeRemove(path, wanted, a)
+	}
+	type acmePlanned struct {
+		path string
+		raw  []byte
+	}
+	var plans []acmePlanned
+	for _, path := range paths {
+		count, raw, _, err := acmePlan(path, wanted)
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if count > 0 {
+			plans = append(plans, acmePlanned{path: path, raw: raw})
+		}
+	}
+	removed := 0
+	saved := ""
+	for _, p := range plans {
+		count, bak, err := acmeApply(p.path, wanted, p.raw, a)
+		if err != nil {
+			if removed > 0 {
+				restarted := a.restartAfterCertChange(r)
+				msg := fmt.Sprintf("removed %d certificate(s), then stopped at %s: %v", removed, filepath.Base(p.path), err)
+				a.failuref("certs", "%s", msg)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": msg, "removed": removed, "partial": true, "backup": filepath.Base(saved), "restarted": restarted})
+				return
+			}
+			status := http.StatusInternalServerError
+			if _, changed := err.(acmeChangedError); changed {
+				status = http.StatusConflict
+			}
+			jsonError(w, err.Error(), status)
 			return
 		}
 		removed += count
@@ -2509,14 +2551,53 @@ func (a *App) certsDeleteHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func acmeRemove(path string, wanted map[string]bool, a *App) (int, string, error) {
+	acmeMu.Lock()
+	defer acmeMu.Unlock()
+	return acmeApply(path, wanted, nil, a)
+}
+
+func acmeApply(path string, wanted map[string]bool, raw []byte, a *App) (int, string, error) {
+	for attempt := 0; attempt < acmeAttempts; attempt++ {
+		if raw == nil {
+			read, err := os.ReadFile(path)
+			if err != nil {
+				return 0, "", fmt.Errorf("could not read %s: %w", filepath.Base(path), err)
+			}
+			raw = read
+		}
+		count, body, err := acmeFilter(path, raw, wanted)
+		if err != nil {
+			return 0, "", err
+		}
+		if count == 0 {
+			return 0, "", nil
+		}
+		bak, err := acmeCommit(path, raw, body, a)
+		if err == nil {
+			return count, bak, nil
+		}
+		if _, changed := err.(acmeChangedError); !changed || attempt == acmeAttempts-1 {
+			return 0, "", err
+		}
+		raw = nil
+	}
+	return 0, "", nil
+}
+
+func acmePlan(path string, wanted map[string]bool) (int, []byte, []byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return 0, "", fmt.Errorf("could not read %s: %w", filepath.Base(path), err)
+		return 0, nil, nil, fmt.Errorf("could not read %s: %w", filepath.Base(path), err)
 	}
+	count, body, err := acmeFilter(path, raw, wanted)
+	return count, raw, body, err
+}
+
+func acmeFilter(path string, raw []byte, wanted map[string]bool) (int, []byte, error) {
 	var store map[string]json.RawMessage
 	if len(bytes.TrimSpace(raw)) > 0 {
 		if err := json.Unmarshal(raw, &store); err != nil {
-			return 0, "", fmt.Errorf("%s is not valid JSON, nothing was changed: %w", filepath.Base(path), err)
+			return 0, nil, fmt.Errorf("%s is not valid JSON, nothing was changed: %w", filepath.Base(path), err)
 		}
 	}
 	removed := 0
@@ -2558,64 +2639,134 @@ func acmeRemove(path string, wanted map[string]bool, a *App) (int, string, error
 		}
 		encoded, err := json.Marshal(kept)
 		if err != nil {
-			return 0, "", err
+			return 0, nil, err
 		}
 		section[key] = encoded
 		merged, err := json.Marshal(section)
 		if err != nil {
-			return 0, "", err
+			return 0, nil, err
 		}
 		out[name] = merged
 	}
 	if removed == 0 {
-		return 0, "", nil
+		return 0, nil, nil
 	}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		return 0, "", err
+		return 0, nil, err
 	}
-	bak, err := acmeBackup(path, a)
+	return removed, data, nil
+}
+
+func acmeCommit(path string, raw, body []byte, a *App) (string, error) {
+	current, err := os.ReadFile(path)
 	if err != nil {
-		return 0, "", err
+		return "", fmt.Errorf("could not read %s: %w", filepath.Base(path), err)
 	}
-	if err := acmeWriteInPlace(path, data); err != nil {
-		return 0, "", err
+	if !bytes.Equal(current, raw) {
+		return "", acmeChangedError{name: filepath.Base(path)}
 	}
-	return removed, bak, nil
+	bak, err := acmeBackupBytes(path, raw, a)
+	if err != nil {
+		return "", err
+	}
+	if err := acmeWriteInPlace(path, body, raw); err != nil {
+		return "", err
+	}
+	return bak, nil
 }
 
 func acmeBackup(path string, a *App) (string, error) {
-	dir := a.backupDir()
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return "", err
-	}
-	dest := filepath.Join(dir, filepath.Base(path)+"."+time.Now().UTC().Format("20060102_150405")+".bak")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(dest, raw, 0o600); err != nil {
-		return "", err
-	}
-	return dest, os.Chmod(dest, 0o600)
+	return acmeBackupBytes(path, raw, a)
 }
 
-func acmeWriteInPlace(path string, data []byte) error {
+func acmeBackupBytes(path string, raw []byte, a *App) (string, error) {
+	dir := a.backupDir()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", err
+	}
+	base := filepath.Base(path)
+	for attempt := 0; attempt < acmeAttempts+2; attempt++ {
+		dest := filepath.Join(dir, base+"."+time.Now().UTC().Format("20060102_150405")+".bak")
+		fh, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if os.IsExist(err) {
+			time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 10*time.Millisecond)))
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, werr := fh.Write(raw)
+		serr := fh.Sync()
+		cerr := fh.Close()
+		if werr != nil {
+			return "", werr
+		}
+		if serr != nil {
+			return "", serr
+		}
+		if cerr != nil {
+			return "", cerr
+		}
+		return dest, os.Chmod(dest, 0o600)
+	}
+	return "", fmt.Errorf("could not create a unique backup of %s, nothing was changed", base)
+}
+
+func acmeWriteInPlace(path string, data []byte, restore []byte) error {
+	padded := data
+	if info, err := os.Stat(path); err == nil && info.Size() > int64(len(data)) {
+		padded = append(append([]byte{}, data...), bytes.Repeat([]byte(" "), int(info.Size())-len(data))...)
+	}
+	if err := acmeWriteAll(path, padded, int64(len(data))); err != nil {
+		if restore != nil {
+			if perr := acmeWriteInPlace(path, restore, nil); perr != nil {
+				log.Printf("certs: could not put %s back after a failed write: %v", filepath.Base(path), perr)
+			}
+		}
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("could not read %s back after writing: %w", filepath.Base(path), err)
+	}
+	if bytes.Equal(got, data) {
+		return nil
+	}
+	if trimmed := bytes.TrimSpace(got); len(trimmed) == 0 || json.Valid(trimmed) {
+		return acmeChangedError{name: filepath.Base(path)}
+	}
+	if restore != nil {
+		if perr := acmeWriteInPlace(path, restore, nil); perr != nil {
+			log.Printf("certs: could not put %s back after a failed write: %v", filepath.Base(path), perr)
+		}
+	}
+	return fmt.Errorf("%s did not read back as valid JSON after writing, the previous copy was put back", filepath.Base(path))
+}
+
+func acmeWriteAll(path string, padded []byte, size int64) error {
 	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
 	defer fh.Close()
-	if _, err := fh.Write(data); err != nil {
-		return err
-	}
-	if err := fh.Truncate(int64(len(data))); err != nil {
+	if _, err := fh.Write(padded); err != nil {
 		return err
 	}
 	if err := fh.Sync(); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	if err := fh.Truncate(size); err != nil {
+		return err
+	}
+	return fh.Sync()
 }
 
 func (a *App) restartAfterCertChange(r *http.Request) bool {

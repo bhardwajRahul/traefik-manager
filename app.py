@@ -3741,15 +3741,17 @@ def api_certs_delete():
     if not state['available']:
         return jsonify({'error': state['reason'] or 'Certificates cannot be edited here'}), 403
 
-    removed = 0
-    saved   = None
     try:
-        for path in state['paths']:
-            count, backup_path = _acme.remove(path, wanted)
-            removed += count
-            saved = backup_path or saved
+        removed, saved = _acme.remove_many(state['paths'], wanted)
+    except _acme.AcmeStorePartial as e:
+        ok, err = trigger_traefik_restart()
+        logger.error(f"Certificate removal stopped partway: {e}")
+        add_notification('error', f"Certificate removal stopped partway: {e}", category='traefik')
+        return jsonify({'error': str(e), 'removed': e.removed, 'partial': True,
+                        'backup': os.path.basename(e.backup or ''),
+                        'restarted': ok, 'restart_error': '' if ok else err}), 500
     except _acme.AcmeStoreError as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)}), e.status
     except OSError as e:
         logger.exception("acme.json write failed")
         return jsonify({'error': f'Could not write acme.json: {e}'}), 500
@@ -4512,8 +4514,10 @@ def api_restore(filename):
                 return jsonify({'error': state['reason'] or 'acme.json cannot be written here'}), 403
             with open(path, 'rb') as fh:
                 body = fh.read()
-            _acme.backup(acme_target)
-            _acme.write_bytes_in_place(acme_target, body)
+            with _acme.store_lock():
+                current = _acme.snapshot(acme_target)
+                _acme.backup(acme_target, current)
+                _acme.write_bytes_in_place(acme_target, body, restore=current)
             ok, err = trigger_traefik_restart()
             logger.info(f"Restored: {filename} -> {acme_target}")
             add_notification('warning', f"Certificate store restored: {filename}", category='backup')
@@ -4525,6 +4529,8 @@ def api_restore(filename):
         logger.info(f"Restored: {filename} → {target_path}")
         add_notification('warning', f"Backup restored: {filename}", category='backup')
         return jsonify({'success': True})
+    except _acme.AcmeStoreError as e:
+        return jsonify({'error': str(e)}), e.status
     except Exception as e:
         logger.exception("Restore error")
         return jsonify({'error': str(e)}), 500

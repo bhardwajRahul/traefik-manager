@@ -289,3 +289,232 @@ def test_the_host_writer_never_renames():
     assert 'os.replace' not in body and 'shutil' not in body, \
         'renaming over a bind mounted acme.json silently detaches it from Traefik'
     assert 'ftruncate' in body and 'fsync' in body
+
+
+def _renew(store, extra_main):
+    data = json.loads(store.read_text())
+    data['letsencrypt']['Certificates'].append(
+        {'domain': {'main': extra_main}, 'certificate': 'CR', 'key': 'KR', 'Store': 'default'})
+    store.write_text(json.dumps(data))
+
+
+def _bak_files(tmp_path):
+    folder = tmp_path / 'backups'
+    return sorted(f for f in os.listdir(folder) if f.endswith('.bak')) if folder.exists() else []
+
+
+def test_a_store_that_changes_before_the_write_is_planned_again(store, monkeypatch):
+    real_plan = acme_store.plan
+    calls = []
+
+    def renewing(path, wanted, raw):
+        result = real_plan(path, wanted, raw)
+        if not calls:
+            _renew(store, 'renewed.example.com')
+        calls.append(1)
+        return result
+
+    monkeypatch.setattr(acme_store, 'plan', renewing)
+    removed, _backup = acme_store.remove(str(store), [('letsencrypt', 'drop.example.com')])
+    assert removed == 1 and len(calls) == 2
+    mains = [c['domain']['main'] for c in json.loads(store.read_text())['letsencrypt']['Certificates']]
+    assert mains == ['keep.example.com', 'renewed.example.com'], \
+        'writing the stale copy would have thrown away the certificate Traefik just renewed'
+
+
+def test_a_store_that_keeps_changing_is_left_alone(store, tmp_path, monkeypatch):
+    real_plan = acme_store.plan
+    seen = []
+
+    def always_renewing(path, wanted, raw):
+        result = real_plan(path, wanted, raw)
+        seen.append(1)
+        _renew(store, 'renewed-%d.example.com' % len(seen))
+        return result
+
+    monkeypatch.setattr(acme_store, 'plan', always_renewing)
+    with pytest.raises(acme_store.AcmeStoreChanged) as err:
+        acme_store.remove(str(store), [('letsencrypt', 'drop.example.com')])
+    assert err.value.status == 409
+    mains = [c['domain']['main'] for c in json.loads(store.read_text())['letsencrypt']['Certificates']]
+    assert 'drop.example.com' in mains and 'renewed-%d.example.com' % acme_store.ATTEMPTS in mains
+    assert _bak_files(tmp_path) == [], 'nothing was written, so nothing should have been backed up'
+
+
+def test_two_removals_at_the_same_time_both_land(store):
+    import threading
+    errors = []
+
+    def run(resolver, domain):
+        try:
+            acme_store.remove(str(store), [(resolver, domain)])
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=a)
+               for a in (('letsencrypt', 'drop.example.com'), ('gone', 'old.example.com'))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert not errors, errors
+    after = json.loads(store.read_text())
+    assert [c['domain']['main'] for c in after['letsencrypt']['Certificates']] == ['keep.example.com']
+    assert after['gone']['Certificates'] == [], 'one removal overwrote the other'
+
+
+def test_the_backup_holds_the_bytes_that_were_edited(store):
+    before = store.read_bytes()
+    _removed, backup = acme_store.remove(str(store), [('letsencrypt', 'drop.example.com')])
+    with open(backup, 'rb') as fh:
+        assert fh.read() == before
+
+
+def test_backups_taken_in_the_same_second_are_both_kept(store, monkeypatch):
+    stamps = iter(['20260914_101010', '20260914_101010', '20260914_101011'])
+    monkeypatch.setattr(acme_store, '_stamp', lambda: next(stamps))
+    monkeypatch.setattr(acme_store, '_wait_for_next_second', lambda: None)
+    first = acme_store.backup(str(store))
+    second = acme_store.backup(str(store))
+    assert first != second and os.path.exists(first) and os.path.exists(second), \
+        'the second backup truncated the first'
+
+
+def test_a_short_write_is_finished(store, monkeypatch):
+    real_write = os.write
+    monkeypatch.setattr(acme_store.os, 'write', lambda fd, data: real_write(fd, bytes(data[:7])))
+    acme_store.remove(str(store), [('letsencrypt', 'drop.example.com')])
+    after = json.loads(store.read_text())
+    assert [c['domain']['main'] for c in after['letsencrypt']['Certificates']] == ['keep.example.com']
+
+
+def test_a_write_cut_off_before_the_truncate_still_parses(store, monkeypatch):
+    body = json.dumps({'letsencrypt': {'Certificates': []}}).encode()
+
+    def fail(fd, size):
+        raise OSError('disk went away')
+
+    monkeypatch.setattr(acme_store.os, 'ftruncate', fail)
+    with pytest.raises(OSError):
+        acme_store.write_bytes_in_place(str(store), body)
+    assert json.loads(store.read_text()) == json.loads(body), \
+        'padding with spaces keeps the file valid JSON if the process stops between write and truncate'
+
+
+def test_a_failed_write_puts_the_store_back(store, monkeypatch):
+    before = store.read_bytes()
+    real = os.ftruncate
+    calls = []
+
+    def fail_once(fd, size):
+        calls.append(size)
+        if len(calls) == 1:
+            raise OSError('disk went away')
+        return real(fd, size)
+
+    monkeypatch.setattr(acme_store.os, 'ftruncate', fail_once)
+    with pytest.raises(OSError):
+        acme_store.remove(str(store), [('letsencrypt', 'drop.example.com')])
+    assert store.read_bytes() == before
+
+
+def test_the_lock_file_stays_out_of_the_certificate_directory(store):
+    acme_store.remove(str(store), [('letsencrypt', 'drop.example.com')])
+    assert sorted(os.listdir(store.parent)) == ['acme.json', 'backups'], \
+        'the certificate directory may be read only, and Traefik owns it'
+
+
+def test_a_broken_second_store_leaves_the_first_untouched(store, tmp_path):
+    bad = tmp_path / 'broken.json'
+    bad.write_text('{not json')
+    bad.chmod(0o600)
+    before = store.read_bytes()
+    with pytest.raises(acme_store.AcmeStoreError):
+        acme_store.remove_many([str(store), str(bad)], [('letsencrypt', 'drop.example.com')])
+    assert store.read_bytes() == before
+    assert _bak_files(tmp_path) == []
+
+
+def test_a_read_only_second_store_leaves_the_first_untouched(store, tmp_path, monkeypatch):
+    other = tmp_path / 'other.json'
+    other.write_text(json.dumps(STORE))
+    other.chmod(0o600)
+    real = acme_store.writable
+    monkeypatch.setattr(acme_store, 'writable', lambda p: False if p == str(other) else real(p))
+    before = store.read_bytes()
+    with pytest.raises(acme_store.AcmeStoreReadOnly) as err:
+        acme_store.remove_many([str(store), str(other)], [('letsencrypt', 'drop.example.com')])
+    assert err.value.status == 403
+    assert store.read_bytes() == before
+
+
+def test_a_failure_after_the_first_store_is_reported_as_partial(store, tmp_path, monkeypatch):
+    other = tmp_path / 'other.json'
+    other.write_text(json.dumps(STORE))
+    other.chmod(0o600)
+    real_commit = acme_store.commit
+
+    def failing(path, raw, body):
+        if path == str(other):
+            raise OSError('disk full')
+        return real_commit(path, raw, body)
+
+    monkeypatch.setattr(acme_store, 'commit', failing)
+    with pytest.raises(acme_store.AcmeStorePartial) as err:
+        acme_store.remove_many([str(store), str(other)], [('letsencrypt', 'drop.example.com')])
+    assert err.value.removed == 1
+    assert 'drop.example.com' not in store.read_text()
+
+
+def _removal_available(monkeypatch, store):
+    import app as app_mod
+    monkeypatch.setattr(app_mod, '_host_cert_manage_state',
+                        lambda: {'available': True, 'reason': '', 'paths': [str(store)]})
+    restarts = []
+    monkeypatch.setattr(app_mod, 'trigger_traefik_restart', lambda: restarts.append(1) or (True, ''))
+    return app_mod, restarts
+
+
+def test_a_store_traefik_changed_answers_conflict_without_a_restart(client, store, monkeypatch):
+    app_mod, restarts = _removal_available(monkeypatch, store)
+
+    def changed(paths, wanted):
+        raise acme_store.AcmeStoreChanged('acme.json changed while it was being edited')
+
+    monkeypatch.setattr(app_mod._acme, 'remove_many', changed)
+    res = client.post('/api/certs/delete',
+                      json={'certs': [{'resolver': 'letsencrypt', 'main': 'drop.example.com'}]}, headers=HDR)
+    assert res.status_code == 409 and not restarts
+
+
+def test_a_partial_removal_still_restarts_traefik(client, store, monkeypatch):
+    app_mod, restarts = _removal_available(monkeypatch, store)
+
+    def partial(paths, wanted):
+        raise acme_store.AcmeStorePartial('stopped partway', 2, '/b/acme.json.20260914_101010.bak')
+
+    monkeypatch.setattr(app_mod._acme, 'remove_many', partial)
+    res = client.post('/api/certs/delete',
+                      json={'certs': [{'resolver': 'letsencrypt', 'main': 'drop.example.com'}]}, headers=HDR)
+    body = res.get_json()
+    assert res.status_code == 500 and body['partial'] is True and body['removed'] == 2
+    assert restarts and body['restarted'] is True, \
+        'Traefik has to reload what is on disk, or it writes the removed certificates back'
+
+
+def test_removal_and_restore_hold_the_store_lock():
+    src = _read('app.py')
+    delete = src[src.index('def api_certs_delete():'):src.index("@app.route('/api/traefik/certs')")]
+    assert '_acme.remove_many(' in delete
+    restore = src[src.index('def api_restore(filename):'):src.index("@app.route('/api/backup/create'")]
+    assert 'with _acme.store_lock():' in restore
+    store = _read('core', 'acme_store.py')
+    body = store[store.index('def remove_many('):]
+    assert 'with store_lock():' in body
+
+
+def test_a_partial_removal_keeps_the_restart_screen_up():
+    js = _read('static', 'js', 'certs.js')
+    body = js[js.index('async function _sendCertRemoval('):js.index('async function _loadCertUsage(')]
+    assert 'body.partial && body.restarted' in body, \
+        'Traefik restarts after a partial removal, so the page is about to go away'

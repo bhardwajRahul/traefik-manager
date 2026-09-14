@@ -283,6 +283,11 @@ async function _sendCertRemoval(list) {
         }
         const body = await res.json().catch(() => ({}));
         if (!res.ok || !body.ok) {
+            if (body.partial && body.restarted && canWait) {
+                showToast(body.error || 'Certificate removal stopped partway', 'error');
+                _waitForReconnect(false, () => refreshCertsTab());
+                return;
+            }
             stop(body.error || 'Could not remove the certificate');
             return;
         }
