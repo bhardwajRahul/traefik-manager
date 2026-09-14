@@ -27,7 +27,7 @@ def _write_acme(tmp_path, monkeypatch, data=None):
     path.chmod(0o600)
     monkeypatch.setenv('ACME_JSON_PATH', str(path))
     from core import env as env_mod
-    env_mod.register_read_path(str(path))
+    env_mod.set_settings_paths('acme', str(path))
     return path
 
 

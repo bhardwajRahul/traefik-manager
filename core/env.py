@@ -1,6 +1,7 @@
 import ipaddress
 import logging
 import os
+import threading
 
 GITHUB_REPO = "chr0nzz/traefik-manager"
 APP_VERSION = "1.14.0"
@@ -201,8 +202,7 @@ if os.environ.get('STATIC_CONFIG_PATH', '').strip():
 
 def allowed_file_prefixes() -> tuple:
     return tuple(sorted(set(
-        ['/app/',
-         os.path.abspath(BACKUP_DIR) + '/',
+        [os.path.abspath(BACKUP_DIR) + '/',
          os.path.dirname(os.path.abspath(SETTINGS_PATH)) + '/'] +
         [os.path.dirname(os.path.abspath(p)) + '/' for p in CONFIG_PATHS] +
         [os.path.dirname(os.path.abspath(p)) + '/' for p in STATIC_CONFIG_DIRS]
@@ -213,31 +213,28 @@ ALLOWED_FILE_PREFIXES = allowed_file_prefixes()
 
 
 ALLOWED_FILES = []
-
-
-def register_static_path(path: str):
-    global STATIC_CONFIG_DIRS, ALLOWED_FILE_PREFIXES, ALLOWED_FILES
-    if not path:
-        return
-    if os.path.isdir(path):
-        if path not in STATIC_CONFIG_DIRS:
-            STATIC_CONFIG_DIRS = sorted(STATIC_CONFIG_DIRS + [path])
-            ALLOWED_FILE_PREFIXES = allowed_file_prefixes()
-        return
-    real = os.path.realpath(path)
-    if real not in ALLOWED_FILES:
-        ALLOWED_FILES = sorted(ALLOWED_FILES + [real])
-
-
 READ_PATHS = []
+_ENV_STATIC_DIRS = list(STATIC_CONFIG_DIRS)
+_SETTINGS_PATHS = {}
+_settings_paths_lock = threading.Lock()
 
 
-def register_read_path(path: str):
-    global READ_PATHS
-    for part in str(path or '').split(','):
-        part = part.strip()
-        if part and part not in READ_PATHS:
-            READ_PATHS = sorted(READ_PATHS + [part])
+def set_settings_paths(kind: str, path: str):
+    global STATIC_CONFIG_DIRS, ALLOWED_FILE_PREFIXES, ALLOWED_FILES, READ_PATHS
+    parts = [p.strip() for p in str(path or '').split(',') if p.strip()]
+    with _settings_paths_lock:
+        _SETTINGS_PATHS[kind] = parts
+        static = _SETTINGS_PATHS.get('static', [])
+        read   = sorted({p for group in _SETTINGS_PATHS.values() for p in group})
+        files  = sorted({os.path.realpath(p) for p in static if not os.path.isdir(p)})
+        dirs   = sorted(set(_ENV_STATIC_DIRS) | {p for p in static if os.path.isdir(p)})
+        if read != READ_PATHS:
+            READ_PATHS = read
+        if files != ALLOWED_FILES:
+            ALLOWED_FILES = files
+        if dirs != STATIC_CONFIG_DIRS:
+            STATIC_CONFIG_DIRS = dirs
+            ALLOWED_FILE_PREFIXES = allowed_file_prefixes()
 
 
 def register_config_path(path: str):

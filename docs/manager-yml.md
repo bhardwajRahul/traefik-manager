@@ -438,6 +438,16 @@ The single webhook from before v1.12.0. Still read, and migrated on first start 
 
 These can be changed without a container restart via **Settings - System Monitoring - File Paths**. The UI setting takes priority over the env var.
 
+A path set here is refused when it is under `/proc`, `/sys` or `/dev`, is one of Traefik Manager's own files, or has the wrong type:
+
+| Field | Must be |
+|---|---|
+| `acme_json_path` | `.json` files or a directory |
+| `access_log_path` | a file, not a directory |
+| `static_config_path` | an existing `.yml`, `.yaml` or `.toml` file |
+
+A refused path is not saved, and one already in `manager.yml` is ignored with a warning in the container log. Env var paths are not checked.
+
 ### `acme_json_path`
 
 **Type:** string - **Default:** `""` (falls back to `ACME_JSON_PATH`, then `/app/acme.json`)

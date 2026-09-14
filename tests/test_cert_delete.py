@@ -36,7 +36,7 @@ def store(tmp_path, monkeypatch):
     path.write_text(json.dumps(STORE))
     path.chmod(0o600)
     monkeypatch.setattr(env_mod, 'BACKUP_DIR', str(tmp_path / 'backups'))
-    env_mod.register_read_path(str(path))
+    env_mod.set_settings_paths('acme', str(path))
     return path
 
 

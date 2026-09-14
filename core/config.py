@@ -100,6 +100,52 @@ def readable_config_path(path: str) -> str:
     return ''
 
 
+_APP_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CODE_DIRS   = ('core', 'templates', 'static', 'agent', 'scripts', 'tests', '.git')
+_KERNEL_DIRS = ('/proc', '/sys', '/dev')
+
+
+def _inside(real: str, base: str) -> bool:
+    return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _settings_part_problem(kind: str, part: str) -> str:
+    real = os.path.realpath(part)
+    for base in _KERNEL_DIRS:
+        if _inside(real, base):
+            return f'{part} is inside {base}'
+    config_dir = os.path.realpath(env.CONFIG_DIR)
+    if (env.is_own_state(real)
+            or real in (os.path.realpath(env.SECRET_KEY_PATH), os.path.realpath(env.OTP_KEY_PATH))
+            or (os.path.dirname(real) == config_dir and os.path.basename(real).startswith('.'))):
+        return f"{part} is one of Traefik Manager's own files"
+    app_dir = os.path.realpath(_APP_DIR)
+    if (real == app_dir or any(_inside(real, os.path.join(app_dir, d)) for d in _CODE_DIRS)
+            or (os.path.dirname(real) == app_dir and real.endswith('.py'))):
+        return f"{part} is part of Traefik Manager's code"
+    if kind == 'static':
+        if os.path.splitext(real)[1].lower() not in ('.yml', '.yaml', '.toml'):
+            return f'{part} is not a .yml, .yaml or .toml file'
+        if not os.path.isfile(real):
+            return f'{part} is not an existing file'
+    elif kind == 'acme':
+        if not os.path.isdir(real) and not real.lower().endswith('.json'):
+            return f'{part} is not a .json file or a directory'
+    elif os.path.isdir(real):
+        return f'{part} is a directory, not a file'
+    return ''
+
+
+def settings_path_problem(kind: str, path: str) -> str:
+    raw   = str(path or '').strip()
+    parts = [p.strip() for p in raw.split(',') if p.strip()] if kind == 'acme' else ([raw] if raw else [])
+    for part in parts:
+        problem = _settings_part_problem(kind, part)
+        if problem:
+            return problem
+    return ''
+
+
 def is_safe_path(path: str) -> bool:
     if not env.ACTIVE_CONFIG_DIR:
         return False

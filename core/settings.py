@@ -718,12 +718,46 @@ def _write_settings(domains, cert_resolver, traefik_api_url,
     logger.info("Manager settings saved")
 
 
-def _get_acme_json_path() -> str:
-    s = load_settings()
-    path = s.get('acme_json_path', '').strip() or os.environ.get('ACME_JSON_PATH', '/app/acme.json')
-    if path:
-        env.register_read_path(path)
+_PATH_FIELDS = {
+    'acme':   ('acme_json_path', 'ACME_JSON_PATH', '/app/acme.json'),
+    'log':    ('access_log_path', 'ACCESS_LOG_PATH', '/app/logs/access.log'),
+    'static': ('static_config_path', 'STATIC_CONFIG_PATH', ''),
+}
+_refused = {}
+_refused_logged = set()
+
+
+def saved_path_problem(kind: str, value: str) -> str:
+    _field, env_name, _default = _PATH_FIELDS[kind]
+    value = str(value or '').strip()
+    if not value or value == os.environ.get(env_name, '').strip():
+        return ''
+    return config.settings_path_problem(kind, value)
+
+
+def refused_path(kind: str) -> str:
+    return _refused.get(kind, '')
+
+
+def _configured_path(kind: str) -> str:
+    field, env_name, default = _PATH_FIELDS[kind]
+    saved   = str(load_settings().get(field, '') or '').strip()
+    problem = saved_path_problem(kind, saved)
+    if problem:
+        if (kind, saved) not in _refused_logged and len(_refused_logged) < 100:
+            _refused_logged.add((kind, saved))
+            logger.warning(f"Ignoring {field} from manager.yml: {problem}")
+        _refused[kind] = problem
+        env.set_settings_paths(kind, '')
+        return ''
+    _refused.pop(kind, None)
+    path = saved or os.environ.get(env_name, default)
+    env.set_settings_paths(kind, path)
     return path
+
+
+def _get_acme_json_path() -> str:
+    return _configured_path('acme')
 
 
 def get_acme_json_paths() -> list:
@@ -746,19 +780,10 @@ def get_acme_json_paths() -> list:
     return out
 
 def _get_access_log_path() -> str:
-    s = load_settings()
-    path = s.get('access_log_path', '').strip() or os.environ.get('ACCESS_LOG_PATH', '/app/logs/access.log')
-    if path:
-        env.register_read_path(path)
-    return path
+    return _configured_path('log')
 
 def _get_static_config_path() -> str:
-    s = load_settings()
-    path = s.get('static_config_path', '').strip() or os.environ.get('STATIC_CONFIG_PATH', '')
-    if path:
-        env.register_static_path(path)
-        env.register_read_path(path)
-    return path
+    return _configured_path('static')
 
 def _get_restart_method() -> str:
     return os.environ.get('RESTART_METHOD', 'proxy').lower()

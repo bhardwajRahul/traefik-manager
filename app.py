@@ -2608,6 +2608,9 @@ def api_static_config_get():
         return jsonify({'raw': raw, 'parsed': parsed, 'path': body.get('path', '')})
     path = _readable_config_path(_get_static_config_path())
     if not path or not os.path.exists(path):
+        refused = _settings.refused_path('static')
+        if refused:
+            return jsonify({'error': f'Static config path refused: {refused}'}), 404
         return jsonify({'error': 'Static config not found or STATIC_CONFIG_PATH not set'}), 404
     try:
         with open(path, 'r') as f:
@@ -2625,6 +2628,9 @@ def api_static_config_get():
 def api_static_config_save():
     path = _get_static_config_path()
     if not path:
+        refused = _settings.refused_path('static')
+        if refused:
+            return jsonify({'error': f'Static config path refused: {refused}'}), 400
         return jsonify({'error': 'STATIC_CONFIG_PATH not configured'}), 400
     safe_path = _safe_file_path(path)
     if not safe_path:
@@ -3792,7 +3798,8 @@ def _host_cert_manage_state():
     method   = _get_restart_method()
     restart  = method in ('proxy', 'socket', 'poison-pill')
     if not resolved:
-        reason = 'acme.json is not mounted'
+        reason = (f"acme.json path refused: {_settings.refused_path('acme')}" if _settings.refused_path('acme')
+                  else 'acme.json is not mounted')
     elif not writable:
         reason = 'acme.json is mounted read only'
     elif not restart:
@@ -3904,6 +3911,9 @@ def api_logs():
     lines_req = min(lines_req, 1000)
     log_path = _readable_config_path(_get_access_log_path())
     if not log_path or not os.path.exists(log_path):
+        refused = _settings.refused_path('log')
+        if refused:
+            return jsonify({'error': f'Access log path refused: {refused}', 'lines': []})
         return jsonify({'error': 'Access log not found. Set ACCESS_LOG_PATH env var or configure the path in Settings.', 'lines': []})
     try:
         lines = []
@@ -4779,6 +4789,12 @@ def api_save_settings():
         acme_json_path    = str(data.get('acme_json_path', '')).strip()
         access_log_path   = str(data.get('access_log_path', '')).strip()
         static_config_path = str(data.get('static_config_path', '')).strip()
+        for _kind, _label, _value in (('static', 'Static config path', static_config_path),
+                                      ('log', 'Access log path', access_log_path),
+                                      ('acme', 'acme.json path', acme_json_path)):
+            _problem = _settings.saved_path_problem(_kind, _value)
+            if _problem:
+                return jsonify({'error': f'{_label}: {_problem}'}), 400
         webhook_url          = str(data.get('webhook_url', '')).strip()
         webhook_type         = str(data.get('webhook_type', 'discord')).strip()
         webhook_username     = str(data.get('webhook_username', '')).strip()
