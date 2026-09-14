@@ -1604,6 +1604,60 @@ func (a *App) gitDiffHandler(w http.ResponseWriter, r *http.Request, sha string)
 	jsonOK(w, map[string]any{"stat": stat, "files": files})
 }
 
+type gitRestoreItem struct {
+	repoPath string
+	dest     string
+}
+
+func (a *App) gitRestoreTargets(repoDir, sha string) ([]gitRestoreItem, bool) {
+	listed, _, rc := a.gitRun([]string{"ls-tree", "-r", "--name-only", sha}, repoDir)
+	if rc != 0 {
+		return nil, false
+	}
+	var paths []string
+	inCommit := map[string]bool{}
+	for _, line := range strings.Split(listed, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			paths = append(paths, line)
+			inCommit[line] = true
+		}
+	}
+	first := func(names ...string) string {
+		for _, name := range names {
+			if inCommit[name] {
+				return name
+			}
+		}
+		return ""
+	}
+	var items []gitRestoreItem
+	cfgPath := a.cfg.ConfigPath
+	if info, err := os.Stat(cfgPath); err == nil && info.IsDir() {
+		for _, p := range paths {
+			if !strings.HasPrefix(p, "dynamic/") {
+				continue
+			}
+			name := strings.TrimPrefix(p, "dynamic/")
+			if _, ok := safeBaseName(name); !ok || !dynamicConfigName(name) {
+				continue
+			}
+			items = append(items, gitRestoreItem{repoPath: p, dest: filepath.Join(cfgPath, name)})
+		}
+	} else if cfgPath != "" {
+		base := filepath.Base(cfgPath)
+		if src := first("dynamic/"+base, base); src != "" {
+			items = append(items, gitRestoreItem{repoPath: src, dest: cfgPath})
+		}
+	}
+	if a.cfg.StaticConfigPath != "" {
+		base := filepath.Base(a.cfg.StaticConfigPath)
+		if src := first("static/"+base, base); src != "" {
+			items = append(items, gitRestoreItem{repoPath: src, dest: a.cfg.StaticConfigPath})
+		}
+	}
+	return items, true
+}
+
 func (a *App) gitRestoreHandler(w http.ResponseWriter, r *http.Request, sha string) {
 	if !shaRe.MatchString(sha) {
 		jsonError(w, "invalid sha", http.StatusBadRequest)
@@ -1616,45 +1670,35 @@ func (a *App) gitRestoreHandler(w http.ResponseWriter, r *http.Request, sha stri
 		jsonError(w, "git repo not initialized", http.StatusBadRequest)
 		return
 	}
+	items, found := a.gitRestoreTargets(repoDir, sha)
+	if !found {
+		jsonError(w, "commit not found", http.StatusNotFound)
+		return
+	}
+	if len(items) == 0 {
+		jsonError(w, "the commit holds no config files for this agent", http.StatusNotFound)
+		return
+	}
 	if _, err := a.createBackup(); err != nil {
 		a.failuref("backup", "pre-restore backup failed: %v", err)
 		jsonError(w, "backup failed, nothing was restored: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	cfgPath := a.cfg.ConfigPath
-	info, _ := os.Stat(cfgPath)
-	isDir := info != nil && info.IsDir()
-	changed, _, rc := a.gitRun([]string{"diff-tree", "--no-commit-id", "-r", "--name-only", sha}, repoDir)
-	if rc != 0 {
-		jsonError(w, "failed to list commit files", http.StatusInternalServerError)
-		return
-	}
-	for _, filename := range strings.Split(changed, "\n") {
-		filename = strings.TrimSpace(filename)
-		if filename == "" {
-			continue
-		}
-		content, _, fileRC := a.gitRun([]string{"show", sha + ":" + filename}, repoDir)
-		if fileRC != 0 {
-			continue
-		}
-		base := filepath.Base(filename)
-		var dest string
-		if isDir {
-			dest = filepath.Join(cfgPath, base)
+	for _, item := range items {
+		content, _, rc := a.gitRun([]string{"show", sha + ":" + item.repoPath}, repoDir)
+		var err error
+		if rc != 0 {
+			err = fmt.Errorf("cannot read it from the commit")
 		} else {
-			dest = cfgPath
+			err = atomicWrite(item.dest, []byte(content))
 		}
-		atomicWrite(dest, []byte(content))
-	}
-	if a.cfg.StaticConfigPath != "" {
-		base := filepath.Base(a.cfg.StaticConfigPath)
-		content, _, rc := a.gitRun([]string{"show", sha + ":static/" + base}, repoDir)
-		if rc == 0 {
-			atomicWrite(a.cfg.StaticConfigPath, []byte(content))
+		if err != nil {
+			a.failuref("git", "restore of %s stopped at %s: %v", sha, item.repoPath, err)
+			jsonError(w, "restore stopped at "+item.repoPath+": "+err.Error()+". A backup was taken before the restore", http.StatusInternalServerError)
+			return
 		}
 	}
-	jsonOK(w, map[string]any{"ok": true})
+	jsonOK(w, map[string]any{"ok": true, "restored": len(items)})
 }
 
 func acmeJSONPaths(raw string) []string {

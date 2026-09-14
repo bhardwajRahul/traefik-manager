@@ -86,7 +86,7 @@ The **History** section shows the last 50 commits. For each commit you can:
 - **View diff** - see exactly which lines changed
 - **Restore** - roll back to that commit's config
 
-Restoring creates a local backup of the current config first (visible under Settings - Backups on the Dynamic Config and Static Config tabs), then writes the files from the selected commit.
+Restoring creates a local backup of the current config first (visible under Settings - Backups on the Dynamic Config and Static Config tabs), then writes every dynamic config file and the static config stored in the selected commit. Files added since that commit are kept.
 
 **Reset local repository** (under Behaviour) deletes the local clone only. The remote repository and its commits are untouched, and the clone is recreated on the next push.
 
