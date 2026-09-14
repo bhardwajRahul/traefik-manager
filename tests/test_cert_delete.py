@@ -241,8 +241,6 @@ def test_the_backups_pane_has_somewhere_to_show_them():
     assert 'id="backup-tab-certs"' in html and 'id="sm-cert-backups-list"' in html
     js = _read('static', 'js', 'settings-modal.js')
     assert "b.kind === 'certs'" in js
-    assert "certTab.style.display = certs.length ? '' : 'none'" in js, \
-        'an empty tab on every install would be noise'
 
 
 def test_the_docs_say_how_to_turn_it_on():
@@ -618,3 +616,15 @@ def test_an_ambiguous_certificate_backup_is_refused(client, tmp_path, monkeypatc
         assert (first.read_bytes(), second.read_bytes()) == before and not restarts
     finally:
         _drop_backups('acme.json.')
+
+
+def test_certificate_backups_are_always_reachable_from_settings():
+    html = _read('templates', 'modals', 'settings_modal.html')
+    tab = html[html.index('id="backup-tab-certs"'):]
+    tab = tab[:tab.index('>')]
+    assert 'display:none' not in tab, 'the Certificates backups tab stayed hidden until a backup existed'
+    assert 'id="msc-backups-certs"' in html, 'the desktop Backups menu has no Certificates entry'
+    assert "openSettingsChild('backups', 'certs')" in html.replace('id="msc-backups-certs" ', ''), \
+        'the mobile Backups menu has no Certificates entry'
+    js = _read('static', 'js', 'settings-modal.js')
+    assert "certTab.style.display" not in js

@@ -98,6 +98,10 @@
                     <span style="display:flex;align-items:center;gap:12px;padding-left:20px;"><i class="ph-bold ph-file-code" style="color:var(--muted)"></i>Static Config</span>
                     <i class="ph-bold ph-caret-right" style="color:var(--muted)"></i>
                 </button>
+                <button class="settings-mobile-row is-child" onclick="openSettingsChild('backups', 'certs')">
+                    <span style="display:flex;align-items:center;gap:12px;padding-left:20px;"><i class="ph-bold ph-shield-check" style="color:var(--muted)"></i>Certificates</span>
+                    <i class="ph-bold ph-caret-right" style="color:var(--muted)"></i>
+                </button>
                 <button class="settings-mobile-row is-child" onclick="openSettingsChild('backups', 'git')">
                     <span style="display:flex;align-items:center;gap:12px;padding-left:20px;"><i class="ph-bold ph-git-branch" style="color:var(--muted)"></i>Git</span>
                     <i class="ph-bold ph-caret-right" style="color:var(--muted)"></i>
@@ -178,6 +182,7 @@
                 <div class="modal-sidebar-sub" id="mss-backups">
                     <button type="button" class="modal-sidebar-btn is-child" id="msc-backups-routes" onclick="openSettingsChild('backups', 'routes')"><i class="ph-bold ph-arrows-split"></i> Dynamic Config</button>
                     <button type="button" class="modal-sidebar-btn is-child" id="msc-backups-static" onclick="openSettingsChild('backups', 'static')"><i class="ph-bold ph-file-code"></i> Static Config</button>
+                    <button type="button" class="modal-sidebar-btn is-child" id="msc-backups-certs" onclick="openSettingsChild('backups', 'certs')"><i class="ph-bold ph-shield-check"></i> Certificates</button>
                     <button type="button" class="modal-sidebar-btn is-child" id="msc-backups-git" onclick="openSettingsChild('backups', 'git')"><i class="ph-bold ph-git-branch"></i> Git</button>
                 </div>
                 <div class="modal-sidebar-section">Remote</div>
@@ -817,7 +822,7 @@
                             <button class="auth-sub-tab" id="backup-tab-static" onclick="switchBackupTab('static', this)">
                                 <i class="ph-bold ph-sliders-horizontal"></i> Static Config
                             </button>
-                            <button class="auth-sub-tab" id="backup-tab-certs" onclick="switchBackupTab('certs', this)" style="display:none">
+                            <button class="auth-sub-tab" id="backup-tab-certs" onclick="switchBackupTab('certs', this)">
                                 <i class="ph-bold ph-shield-check"></i> Certificates
                             </button>
                             <button class="auth-sub-tab" id="backup-tab-git" onclick="switchBackupTab('git', this)">

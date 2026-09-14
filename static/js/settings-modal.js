@@ -1476,15 +1476,18 @@ async function loadBackups() {
     }
     const routesList  = document.getElementById('sm-backups-list');
     const staticList  = document.getElementById('sm-static-backups-list');
+    const certList    = document.getElementById('sm-cert-backups-list');
     const spinner = `<div class="text-center py-8" style="color:var(--muted)"><i class="ph-light ph-spinner-gap text-2xl animate-spin block mb-2"></i>Loading…</div>`;
     if (routesList) routesList.innerHTML = spinner;
     if (staticList) staticList.innerHTML = spinner;
+    if (certList)   certList.innerHTML   = spinner;
     try {
         const res  = await _backupFetch('/api/backups');
         if (!res.ok) {
             const msg = await _errText(res, 'Could not load backups');
             if (routesList) routesList.innerHTML = `<p class="text-sm px-1" style="color:var(--red)">${_esc(msg)}</p>`;
             if (staticList) staticList.innerHTML = '';
+            if (certList)   certList.innerHTML   = '';
             return;
         }
         const raw     = await res.json();
@@ -1501,8 +1504,6 @@ async function loadBackups() {
         _renderBackupList('sm-backups-list', routes);
         _renderBackupList('sm-static-backups-list', statics);
         _renderBackupList('sm-cert-backups-list', certs);
-        const certTab = document.getElementById('backup-tab-certs');
-        if (certTab) certTab.style.display = certs.length ? '' : 'none';
         if (isAgent && !hasStaticSide && document.getElementById('backup-sub-static')?.style.display !== 'none') {
             switchBackupTab('routes', document.getElementById('backup-tab-routes'));
         }
@@ -1510,6 +1511,7 @@ async function loadBackups() {
         const msg = _esc(_netErrText(e, 'Failed to load backups'));
         if (routesList) routesList.innerHTML = `<p class="text-sm px-1" style="color:var(--red)">${msg}</p>`;
         if (staticList) staticList.innerHTML = `<p class="text-sm px-1" style="color:var(--red)">${msg}</p>`;
+        if (certList)   certList.innerHTML   = `<p class="text-sm px-1" style="color:var(--red)">${msg}</p>`;
     }
 }
 
