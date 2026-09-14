@@ -1,7 +1,7 @@
 import os
 import threading
 
-from core import config, crypto, env
+from core import config, crypto, env, locks
 from core.env import logger
 
 
@@ -100,6 +100,15 @@ def load_agents() -> list:
             logger.warning(f"Agent migration from manager.yml failed: {e}")
 
     return []
+
+def modify_agents(fn):
+    with locks.file_lock(env.AGENTS_PATH):
+        agents = load_agents()
+        result = fn(agents)
+        if result is not False:
+            save_agents_file(agents)
+        return result
+
 
 def save_agents_file(agents: list):
     os.makedirs(os.path.dirname(env.AGENTS_PATH), exist_ok=True)

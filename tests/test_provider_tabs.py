@@ -92,9 +92,9 @@ def test_the_host_and_agents_both_get_their_tabs_turned_on():
         'agents must discover their own providers, same as the host'
     start = src.index('def _enable_agent_provider_tabs')
     agent = src[start:src.index('\ndef ', start + 10)]
-    assert 'save_agents_file' in agent, 'the agent tab choice has to survive a restart'
+    assert 'modify_agents' in agent, 'the agent tab choice has to survive a restart'
     host = src[src.index('def _enable_host_provider_tabs'):src.index('def _enable_agent_provider_tabs')]
-    assert 'provider_tabs_seen' in host and 'save_settings' in host
+    assert 'provider_tabs_seen' in host and 'modify_settings' in host
 
 
 def test_the_setup_wizard_ticks_what_traefik_reports():

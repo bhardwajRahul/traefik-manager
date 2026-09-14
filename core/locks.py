@@ -1,3 +1,4 @@
+import hashlib
 import os
 import threading
 from contextlib import contextmanager
@@ -48,3 +49,29 @@ def file_lock(path):
                     fh.close()
                 except Exception:
                     pass
+
+
+_held = threading.local()
+
+
+@contextmanager
+def config_edit_lock(scope):
+    from core import env
+    key  = str(scope or 'config:local')
+    held = getattr(_held, 'scopes', None)
+    if held is None:
+        held = _held.scopes = set()
+    if key in held:
+        yield
+        return
+    base = os.path.join(os.path.dirname(os.path.abspath(env.SETTINGS_PATH)), '.locks')
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        pass
+    with file_lock(os.path.join(base, hashlib.sha1(key.encode()).hexdigest())):
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)

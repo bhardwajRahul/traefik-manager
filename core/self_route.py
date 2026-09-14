@@ -1,7 +1,7 @@
 import os
 import threading
 
-from core import config, env
+from core import config, env, locks
 from core.env import logger
 
 SELF_ROUTE_FILENAME = 'traefik-manager-self.yml'
@@ -14,6 +14,11 @@ def _self_route_path() -> str:
 
 
 def _write_self_route(domain: str, service_url: str, cert_resolver: str, router_name: str = 'traefik-manager', entry_point: str = 'websecure') -> None:
+    with locks.config_edit_lock('config:local'):
+        _write_self_route_locked(domain, service_url, cert_resolver, router_name, entry_point)
+
+
+def _write_self_route_locked(domain, service_url, cert_resolver, router_name, entry_point) -> None:
     router_entry = {
         'rule': f'Host(`{domain}`)',
         'entryPoints': [entry_point or 'websecure'],
@@ -55,6 +60,11 @@ def _write_self_route(domain: str, service_url: str, cert_resolver: str, router_
 
 
 def _delete_self_route(router_name: str = 'traefik-manager') -> None:
+    with locks.config_edit_lock('config:local'):
+        _delete_self_route_locked(router_name)
+
+
+def _delete_self_route_locked(router_name) -> None:
     if env.ACTIVE_CONFIG_DIR:
         path = _self_route_path()
         if os.path.exists(path):

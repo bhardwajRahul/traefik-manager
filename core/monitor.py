@@ -516,41 +516,44 @@ def _apply_provider_tabs(server, name, overview):
 
 
 def _enable_host_provider_tabs(found):
-    settings  = settings_mod.load_settings()
-    seen      = list(settings.get('provider_tabs_seen') or [])
-    fresh     = providers_mod.newly_seen(found, seen)
-    if not fresh:
-        return []
-    tabs = dict(settings.get('visible_tabs') or {})
-    turned = [t for t in fresh if not tabs.get(t)]
-    for tab in fresh:
-        tabs[tab] = True
-    settings_mod.save_settings(
-        domains=settings['domains'], cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'], auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'], visible_tabs=tabs,
-        provider_tabs_seen=seen + fresh)
+    turned = []
+
+    def enable(settings):
+        seen  = list(settings.get('provider_tabs_seen') or [])
+        fresh = providers_mod.newly_seen(found, seen)
+        if not fresh:
+            return None
+        tabs = dict(settings.get('visible_tabs') or {})
+        turned.extend(t for t in fresh if not tabs.get(t))
+        for tab in fresh:
+            tabs[tab] = True
+        return {'visible_tabs': tabs, 'provider_tabs_seen': seen + fresh}
+
+    settings_mod.modify_settings(enable)
     return turned
 
 
 def _enable_agent_provider_tabs(agent_id, found):
-    agents = agents_store_mod.load_agents()
     turned = []
-    for agent in agents:
-        if agent.get('id') != agent_id:
-            continue
-        seen  = list(agent.get('provider_tabs_seen') or [])
-        fresh = providers_mod.newly_seen(found, seen)
-        if not fresh:
-            return []
-        tabs   = dict(agent.get('visible_tabs') or {})
-        turned = [t for t in fresh if not tabs.get(t)]
-        for tab in fresh:
-            tabs[tab] = True
-        agent['visible_tabs']       = tabs
-        agent['provider_tabs_seen'] = seen + fresh
-        agents_store_mod.save_agents_file(agents)
-        break
+
+    def enable(agents):
+        for agent in agents:
+            if agent.get('id') != agent_id:
+                continue
+            seen  = list(agent.get('provider_tabs_seen') or [])
+            fresh = providers_mod.newly_seen(found, seen)
+            if not fresh:
+                return False
+            tabs = dict(agent.get('visible_tabs') or {})
+            turned.extend(t for t in fresh if not tabs.get(t))
+            for tab in fresh:
+                tabs[tab] = True
+            agent['visible_tabs']       = tabs
+            agent['provider_tabs_seen'] = seen + fresh
+            return True
+        return False
+
+    agents_store_mod.modify_agents(enable)
     return turned
 
 

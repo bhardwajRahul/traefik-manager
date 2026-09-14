@@ -1,4 +1,5 @@
 import fcntl
+import copy
 import os
 import re
 import time
@@ -16,7 +17,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from datetime import datetime, timezone, timedelta
 import click
 from flask import (Flask, render_template, request, redirect,
-                   url_for, flash, jsonify, abort, session, send_file)
+                   url_for, flash, jsonify, abort, session, send_file, g, has_request_context)
+from functools import wraps
 from werkzeug.middleware.proxy_fix import ProxyFix
 from ruamel.yaml import YAML
 from ruamel.yaml import YAML as SafeYAML
@@ -381,6 +383,53 @@ _ALLOWED_API_SCHEMES = env.ALLOWED_API_SCHEMES
 
 def _ssrf_ok(url: str) -> bool:
     return _reach.ssrf_ok(url)
+
+
+_EDIT_DICTS = ('managed_middlewares', 'disabled_routes')
+
+
+def _edit_scope() -> str:
+    agent_id = (request.form.get('agent_id', '') or request.args.get('agent_id', '')
+                or request.args.get('server', ''))
+    if not agent_id:
+        body = request.get_json(force=True, silent=True)
+        if isinstance(body, dict):
+            agent_id = body.get('agent_id') or body.get('server') or ''
+    agent_id = str(agent_id or '').strip()
+    return f'config:agent:{agent_id}' if agent_id else 'config:local'
+
+
+def _config_edit(fn):
+    @wraps(fn)
+    def inner(*args, **kwargs):
+        with _locks.config_edit_lock(_edit_scope()):
+            owner = 'edit_base' not in g
+            if owner:
+                current = load_settings()
+                g.edit_base = {k: copy.deepcopy(current.get(k) or {}) for k in _EDIT_DICTS}
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                if owner:
+                    g.pop('edit_base', None)
+    return inner
+
+
+def _save_edit_dicts(**after):
+    base = g.get('edit_base') if has_request_context() else None
+    if base is None:
+        return update_settings(**after)
+    _settings.merge_settings_dicts({k: base.get(k) or {} for k in after}, **after)
+    for k, v in after.items():
+        base[k] = copy.deepcopy(v or {})
+
+
+def _agents_locked(fn):
+    @wraps(fn)
+    def inner(*args, **kwargs):
+        with _locks.file_lock(env.AGENTS_PATH):
+            return fn(*args, **kwargs)
+    return inner
 
 
 def _register_config_path(path: str):
@@ -1529,6 +1578,7 @@ def api_routers():
 @app.route('/api/services/<path:name>/ownership', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_service_ownership(name):
     data   = request.get_json(silent=True) or {}
     adopt  = bool(data.get('adopt'))
@@ -1561,7 +1611,7 @@ def api_service_ownership(name):
         del ledger[key]
     else:
         return jsonify({'ok': True, 'owned': False})
-    update_settings(managed_middlewares=ledger)
+    _save_edit_dicts(managed_middlewares=ledger)
     logger.info(f"Service {bare!r} {'adopted' if adopt else 'released'} by {request.remote_addr}")
     return jsonify({'ok': True, 'owned': adopt})
 
@@ -1715,6 +1765,7 @@ def _svc_agent_ctx():
 @app.route('/api/services', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_service_save():
     data      = request.get_json(silent=True) or {}
     name      = str(data.get('name') or '').strip()
@@ -1823,7 +1874,7 @@ def api_service_save():
     if original and original != name:
         _cascade_across_configs(agent, lambda c: _retarget_service(c, original, name),
                                 already=cfg_filename if agent else target_path)
-    update_settings(managed_middlewares=ledger)
+    _save_edit_dicts(managed_middlewares=ledger)
     logger.info(f"Service {name!r} saved by {request.remote_addr}")
     add_notification('success', f'Service {name} saved', category='config')
     if agent:
@@ -1837,6 +1888,7 @@ def api_service_save():
 @app.route('/api/services/<path:name>', methods=['DELETE'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_service_delete(name):
     bare     = str(name).split('@')[0]
     agent_id, agent, err = _svc_agent_ctx()
@@ -1918,7 +1970,7 @@ def api_service_delete(name):
         else:
             create_backup(where)
             save_config(_strip_empty_sections(config), where)
-    update_settings(managed_middlewares=ledger)
+    _save_edit_dicts(managed_middlewares=ledger)
     logger.info(f"Service {bare!r} deleted by {request.remote_addr}")
     add_notification('warning', f'Service {bare} deleted', category='config')
     if agent:
@@ -1951,19 +2003,21 @@ def _owned_parent_services(agent_id: str = '') -> list:
 
 
 def _prune_service_ledger(agent_id: str = ''):
-    settings = load_settings()
-    ledger   = settings.get('managed_middlewares') or {}
+    ledger = load_settings().get('managed_middlewares') or {}
     if not any(isinstance(k, str) and 'svc::' in k for k in ledger):
         return
-    if _get_config_parse_errors():
-        return
-    configs = [load_config(p) for p in env.CONFIG_PATHS]
-    if not any(cfg for cfg in configs):
-        return
-    kept, dropped = _svc_own.prune(ledger, configs, agent_id)
-    if not dropped:
-        return
-    update_settings(managed_middlewares=kept)
+    with _locks.config_edit_lock(f'config:agent:{agent_id}' if agent_id else 'config:local'):
+        if _get_config_parse_errors():
+            return
+        configs = [load_config(p) for p in env.CONFIG_PATHS]
+        if not any(cfg for cfg in configs):
+            return
+
+        def prune(current):
+            kept, dropped = _svc_own.prune(current.get('managed_middlewares') or {}, configs, agent_id)
+            return {'managed_middlewares': kept} if dropped else None
+
+        _settings.modify_settings(prune)
 
 
 @app.route('/api/traefik/services')
@@ -2625,6 +2679,7 @@ def api_static_config_get():
 @app.route('/api/static/config', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_static_config_save():
     path = _get_static_config_path()
     if not path:
@@ -3552,6 +3607,7 @@ def api_plugin_catalog():
 @app.route('/api/plugins/install', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_plugins_install():
     data = request.get_json(silent=True) or {}
     static_yaml = (data.get('static_yaml') or '').strip()
@@ -4124,6 +4180,7 @@ def api_git_backup_diff(sha):
 @app.route('/api/backup/git/restore/<sha>', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_git_backup_restore(sha):
     if not re.match(r'^[0-9a-f]{7,40}$', sha):
         abort(400)
@@ -4514,6 +4571,7 @@ def api_tls_options_list():
 @app.route('/api/tls-options', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_tls_options_save():
     data = request.get_json(silent=True) or {}
     name = data.get('name', '').strip()
@@ -4573,6 +4631,7 @@ def api_tls_options_save():
 @app.route('/api/tls-options/<name>', methods=['DELETE'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_tls_options_delete(name):
     config_file = request.args.get('configFile', '').strip()
     server = request.args.get('server', '').strip()
@@ -4614,6 +4673,7 @@ def api_backups():
 @limiter.limit("10 per minute")
 @csrf_protect
 @login_required
+@_config_edit
 def api_restore(filename):
     try:
         path = _validated_backup_path(filename)
@@ -5351,7 +5411,7 @@ def _disabled_key(disabled, full_id, plain_id, prefix=''):
 
 
 def _save_disabled_routes(settings, disabled):
-    update_settings(disabled_routes=disabled)
+    _save_edit_dicts(disabled_routes=disabled)
 
 
 def _toggle_route(route_id: str, enable: bool):
@@ -5446,7 +5506,7 @@ def _toggle_route(route_id: str, enable: bool):
         create_backup(target_path)
         save_config(_strip_empty_sections(svc_config), target_path)
 
-    update_settings(disabled_routes=disabled)
+    _save_edit_dicts(disabled_routes=disabled)
 
 
 def _self_route_service_name() -> str:
@@ -5643,12 +5703,13 @@ def _toggle_route_agent(agent: dict, agent_id: str, route_id: str, enable: bool)
             else:
                 continue
             break
-    update_settings(disabled_routes=disabled)
+    _save_edit_dicts(disabled_routes=disabled)
 
 
 @app.route('/api/routes/<path:route_id>/toggle', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_toggle_route(route_id):
     body     = request.get_json(force=True, silent=True) or {}
     enable   = body.get('enable', True)
@@ -5703,6 +5764,7 @@ def api_route_raw_get(route_id):
 @app.route('/api/routes/<path:route_id>/raw', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_route_raw_save(route_id):
     body    = request.get_json(force=True, silent=True) or {}
     content = body.get('content', '')
@@ -5842,6 +5904,7 @@ def _is_fetch():
 @app.route('/save', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def save_entry():
     fetch = _is_fetch()
     try:
@@ -6320,7 +6383,7 @@ def save_entry():
                                managed_backends=_udp_managed)
 
         if _ledger_changed:
-            update_settings(managed_middlewares=_ledger)
+            _save_edit_dicts(managed_middlewares=_ledger)
         _was_disabled = False
         if is_edit and original_id:
             _disabled_now = load_settings().get('disabled_routes', {})
@@ -6408,6 +6471,7 @@ def _drop_owned_transport(config, svc_name, ledger, agent_id=''):
 @app.route('/delete/<router_id>', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def delete_entry(router_id):
     fetch = _is_fetch()
     try:
@@ -6470,8 +6534,7 @@ def delete_entry(router_id):
         else:
             threading.Thread(target=lambda: _git_push_if_enabled('route delete'), daemon=True).start()
         if _del_ledger_changed:
-            _s = load_settings()
-            update_settings(managed_middlewares=_del_ledger)
+            _save_edit_dicts(managed_middlewares=_del_ledger)
         msg = f"Route {plain_id} deleted"
         add_notification('warning', msg)
         if fetch:
@@ -6488,6 +6551,7 @@ def delete_entry(router_id):
 @app.route('/save-middleware', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def save_middleware():
     fetch = _is_fetch()
     try:
@@ -6772,6 +6836,7 @@ def _retarget_middleware(config, old: str, new: str) -> bool:
 @app.route('/delete-middleware/<mw_name>', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def delete_middleware(mw_name):
     fetch = _is_fetch()
     try:
@@ -7394,6 +7459,7 @@ def api_agents_list():
 @app.route('/api/agents', methods=['POST'])
 @csrf_protect
 @login_required
+@_agents_locked
 def api_agents_create():
     import uuid as _uuid
     data = request.get_json(silent=True) or {}
@@ -7462,6 +7528,7 @@ def _agent_url_error(url: str) -> str:
 @app.route('/api/agents/<agent_id>', methods=['PUT'])
 @csrf_protect
 @login_required
+@_agents_locked
 def api_agents_update(agent_id):
     data    = request.get_json(silent=True) or {}
     agents  = load_agents()
@@ -7550,23 +7617,29 @@ def _remove_agent_git_clone(agent_id: str) -> bool:
 
 
 def _forget_agent_settings(agent_id: str) -> bool:
-    prefix = f"agent_{agent_id}::"
-    s = load_settings()
-    disabled = {k: v for k, v in (s.get('disabled_routes') or {}).items()
-                if not str(k).startswith(prefix)}
-    ledger   = {k: v for k, v in (s.get('managed_middlewares') or {}).items()
-                if not str(k).startswith(prefix)}
-    if (len(disabled) == len(s.get('disabled_routes') or {})
-            and len(ledger) == len(s.get('managed_middlewares') or {})):
-        return False
-    update_settings(disabled_routes=disabled,
-                    managed_middlewares=ledger)
-    return True
+    prefix  = f"agent_{agent_id}::"
+    changed = []
+
+    def forget(s):
+        disabled = {k: v for k, v in (s.get('disabled_routes') or {}).items()
+                    if not str(k).startswith(prefix)}
+        ledger   = {k: v for k, v in (s.get('managed_middlewares') or {}).items()
+                    if not str(k).startswith(prefix)}
+        if (len(disabled) == len(s.get('disabled_routes') or {})
+                and len(ledger) == len(s.get('managed_middlewares') or {})):
+            return None
+        changed.append(True)
+        return {'disabled_routes': disabled, 'managed_middlewares': ledger}
+
+    with _locks.config_edit_lock(f'config:agent:{agent_id}'):
+        _settings.modify_settings(forget)
+    return bool(changed)
 
 
 @app.route('/api/agents/<agent_id>', methods=['DELETE'])
 @csrf_protect
 @login_required
+@_agents_locked
 def api_agents_delete(agent_id):
     before = load_agents()
     agents = [a for a in before if a.get('id') != agent_id]
@@ -7581,6 +7654,7 @@ def api_agents_delete(agent_id):
 @app.route('/api/agents/<agent_id>/rotate-key', methods=['POST'])
 @csrf_protect
 @login_required
+@_agents_locked
 def api_agents_rotate_key(agent_id):
     try:
         agents = load_agents()

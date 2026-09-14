@@ -39,6 +39,35 @@ def bump_session_epoch(**changes):
     _write_settings(**fields)
     return fields['session_epoch']
 
+
+@serialized
+def modify_settings(fn):
+    current = load_settings()
+    changes = fn(current)
+    if not changes:
+        return None
+    fields = {k: current.get(k) for k in CARRIED}
+    fields.update(changes)
+    return _write_settings(**fields)
+
+
+@serialized
+def merge_settings_dicts(before: dict, **after):
+    current = load_settings()
+    fields  = {k: current.get(k) for k in CARRIED}
+    for key, new in after.items():
+        old    = before.get(key) or {}
+        new    = new or {}
+        merged = dict(current.get(key) or {})
+        for k, v in new.items():
+            if k not in old or old[k] != v:
+                merged[k] = v
+        for k in old:
+            if k not in new:
+                merged.pop(k, None)
+        fields[key] = merged
+    return _write_settings(**fields)
+
 OPTIONAL_TABS = ['dashboard', 'routemap', 'docker', 'kubernetes', 'swarm', 'nomad', 'ecs', 'consulcatalog', 'redis', 'etcd', 'consul', 'zookeeper', 'http_provider', 'file_external', 'internal', 'certs', 'tls', 'crowdsec', 'plugins', 'logs', 'static']
 
 
