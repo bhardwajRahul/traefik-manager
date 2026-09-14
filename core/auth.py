@@ -74,8 +74,28 @@ def _is_authenticated() -> bool:
         return True
     return session.get('authenticated') is True
 
+def _session_epoch() -> int:
+    try:
+        return int(settings_mod.load_settings().get('session_epoch') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def _stamp_session():
+    session['epoch'] = _session_epoch()
+
+def _drop_stale_session() -> bool:
+    if not session.get('authenticated'):
+        return False
+    if int(session.get('epoch') or 0) == _session_epoch():
+        return False
+    logger.info(f"Signed out a session issued before the last password change, for {request.remote_addr}")
+    session.clear()
+    return True
+
 def _check_inactivity():
     if not session.get('authenticated'):
+        return
+    if _drop_stale_session():
         return
     last = session.get('last_active')
     now  = time.time()

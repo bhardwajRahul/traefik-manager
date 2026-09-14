@@ -29,6 +29,16 @@ def update_settings(**changes):
     fields.update(changes)
     return _write_settings(**fields)
 
+
+@serialized
+def bump_session_epoch(**changes):
+    current = load_settings()
+    fields  = {k: current.get(k) for k in CARRIED}
+    fields.update(changes)
+    fields['session_epoch'] = int(current.get('session_epoch') or 0) + 1
+    _write_settings(**fields)
+    return fields['session_epoch']
+
 OPTIONAL_TABS = ['dashboard', 'routemap', 'docker', 'kubernetes', 'swarm', 'nomad', 'ecs', 'consulcatalog', 'redis', 'etcd', 'consul', 'zookeeper', 'http_provider', 'file_external', 'internal', 'certs', 'tls', 'crowdsec', 'plugins', 'logs', 'static']
 
 
@@ -201,6 +211,8 @@ def load_settings() -> dict:
         'must_change_password': False,
         'setup_password_reset': False,
         'setup_complete':       False,
+        'session_epoch':        0,
+        'admin_password_fp':    '',
         'otp_secret':           '',
         'otp_enabled':          False,
         'disabled_routes':      {},
@@ -302,6 +314,13 @@ def load_settings() -> dict:
             merged['setup_password_reset'] = bool(data['setup_password_reset'])
         if 'setup_complete' in data:
             merged['setup_complete'] = bool(data['setup_complete'])
+        if 'session_epoch' in data:
+            try:
+                merged['session_epoch'] = max(0, int(data['session_epoch']))
+            except (TypeError, ValueError):
+                merged['session_epoch'] = 0
+        if 'admin_password_fp' in data:
+            merged['admin_password_fp'] = str(data['admin_password_fp'] or '').strip()
         if 'otp_secret' in data:
             merged['otp_secret'] = crypto.decrypt_secret(str(data['otp_secret']).strip())
         if 'otp_enabled' in data:
@@ -458,6 +477,7 @@ def load_settings() -> dict:
 def _write_settings(domains, cert_resolver, traefik_api_url,
                   auth_enabled=True, auth_external_ack=None, password_hash='', visible_tabs=None,
                   must_change_password=None, setup_password_reset=None, setup_complete=None,
+                  session_epoch=None, admin_password_fp=None,
                   otp_secret=None, otp_enabled=None,
                   api_keys=None,
                   disabled_routes=None,
@@ -499,6 +519,10 @@ def _write_settings(domains, cert_resolver, traefik_api_url,
         setup_password_reset = _cur.get('setup_password_reset', False)
     if setup_complete is None:
         setup_complete = _cur.get('setup_complete', False)
+    if session_epoch is None:
+        session_epoch = _cur.get('session_epoch', 0)
+    if admin_password_fp is None:
+        admin_password_fp = _cur.get('admin_password_fp', '')
     if otp_secret is None:
         otp_secret = _cur.get('otp_secret', '')
     if otp_enabled is None:
@@ -626,6 +650,8 @@ def _write_settings(domains, cert_resolver, traefik_api_url,
         'must_change_password': must_change_password,
         'setup_password_reset': bool(setup_password_reset),
         'setup_complete':       setup_complete,
+        'session_epoch':        int(session_epoch or 0),
+        'admin_password_fp':    str(admin_password_fp or ''),
         'otp_secret':           otp_secret,
         'otp_enabled':          otp_enabled,
         'disabled_routes':      disabled_routes,

@@ -689,13 +689,28 @@ async function changePassword() {
         if (!res.ok) return show(await _errText(res, 'Failed to update password'), false);
         const data = await res.json();
         if (data.success) {
-            show('Password updated successfully.', true);
+            show('Password updated. Every other session was signed out.', true);
             ['pwCurrent','pwNew','pwConfirm'].forEach(id => document.getElementById(id).value = '');
         } else {
             show(data.error || data.message || 'Failed to update password.', false);
         }
     } catch(e) {
         show(_netErrText(e, 'Request failed'), false);
+    }
+}
+
+async function revokeOtherSessions() {
+    if (!await _confirm('Sign out every other browser session? This one stays signed in, and API keys keep working.',
+                        'Sign Out Other Sessions', 'Sign out')) return;
+    try {
+        const res = await fetch('/api/auth/sessions/revoke', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ..._csrfHeaders() },
+        });
+        if (!res.ok) { showToast(await _errText(res, 'Could not sign out other sessions'), 'error'); return; }
+        showToast('Every other session was signed out', 'success');
+    } catch (e) {
+        showToast(_netErrText(e, 'Could not sign out other sessions'), 'error');
     }
 }
 

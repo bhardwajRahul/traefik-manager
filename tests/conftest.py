@@ -81,6 +81,10 @@ def _reset_settings():
         visible_tabs=s["visible_tabs"],
         disabled_routes={},
         managed_middlewares={},
+        must_change_password=False,
+        setup_password_reset=False,
+        session_epoch=0,
+        admin_password_fp='',
     )
 
 

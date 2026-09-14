@@ -321,7 +321,7 @@ paths:
     post:
       tags: [Authentication]
       summary: Change password
-      description: Change the login password. Rate-limited to 10/min.
+      description: Change the login password. Rate-limited to 10/min. Every other browser session is signed out.
       requestBody:
         required: true
         content:
@@ -333,6 +333,18 @@ paths:
                 current_password: { type: string }
                 new_password: { type: string }
                 confirm_password: { type: string }
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SuccessResponse" }
+
+  /api/auth/sessions/revoke:
+    post:
+      tags: [Authentication]
+      summary: Sign out other sessions
+      description: Sign out every other browser session. The caller stays signed in, and API keys keep working.
       responses:
         "200":
           description: Success

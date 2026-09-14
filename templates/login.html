@@ -403,6 +403,14 @@
                 <input type="password" id="confirm" name="confirm" class="input-field"
                        placeholder="Repeat your password" autocomplete="new-password" required>
             </div>
+            {% if otp_required %}
+            <div class="field">
+                <label for="code">Authenticator code</label>
+                <input type="text" id="code" name="code" class="input-field"
+                       placeholder="000000" autocomplete="one-time-code" inputmode="numeric" maxlength="6" required
+                       style="font-family:'JetBrains Mono',monospace;letter-spacing:.2em;font-size:20px;text-align:center">
+            </div>
+            {% endif %}
             <button type="submit" class="btn-primary" style="width:100%;margin-top:4px">
                 <i class="ph-bold ph-check"></i> Set password
             </button>

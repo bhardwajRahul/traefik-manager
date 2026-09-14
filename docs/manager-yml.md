@@ -208,7 +208,7 @@ python3 -c "import bcrypt; print(bcrypt.hashpw(b'yourpassword', bcrypt.gensalt()
 
 **Type:** boolean - **Default:** `false`
 
-When `true`, the user is redirected to a forced password-change screen after login. Set automatically by the CLI reset command when run with no password option.
+When `true`, a browser signed in with the local password stays on a forced password-change screen until a new password is set, going through the setup wizard first if setup is not finished. API keys, OIDC sign-ins and installs with login turned off are not affected. Set automatically by the CLI reset command when run with no password option.
 
 ---
 
@@ -219,8 +219,24 @@ When `true`, the user is redirected to a forced password-change screen after log
 When `true`, opening Traefik Manager asks for a new password and nothing else - the setup wizard is
 skipped and the rest of `manager.yml` is left alone. While it is `true` that page is open to anyone who
 can reach Traefik Manager, so use it promptly. It clears on any password change and on the next
-successful login. Set by the CLI reset command when run with no password option, or by hand to recover
+successful sign-in, by password, two-factor or OIDC. Set by the CLI reset command when run with no password option, or by hand to recover
 from a lost password (see [Reset Password](/reset-password#method-3-manual-reset-via-manager-yml)).
+
+---
+
+### `session_epoch`
+
+**Type:** integer - **Default:** `0`
+
+Every browser session remembers the value it signed in under, and is signed out once it no longer matches. Changing or resetting the password, turning off two-factor, changing `ADMIN_PASSWORD`, and **Sign out other sessions** each raise it by one. Raise it by hand after writing a password hash into this file.
+
+---
+
+### `admin_password_fp`
+
+**Type:** string - **Default:** `""`
+
+A keyed fingerprint of `ADMIN_PASSWORD`, never the password itself. When it changes between starts, every session is signed out. Managed automatically.
 
 ---
 

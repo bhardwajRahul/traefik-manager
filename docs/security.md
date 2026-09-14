@@ -29,7 +29,7 @@ Sessions use signed client-side cookies (Flask SecureCookieSession). The signing
 
 Set `COOKIE_SECURE=true` whenever TM is accessed over HTTPS. Without it, browsers may send cookies over HTTP, which is a risk if your reverse proxy is not enforcing HTTPS-only access. It also adds a `Strict-Transport-Security` response header.
 
-Logging out clears the session.
+Logging out clears the session. Changing or resetting the password, turning off two-factor, or changing `ADMIN_PASSWORD` and restarting signs out every other session. **Settings - Authentication - Password & 2FA** can also sign out every other session on demand. API keys are not affected.
 
 ---
 

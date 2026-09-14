@@ -4,6 +4,7 @@ import re
 import time
 import base64
 import hashlib
+import hmac
 from urllib.parse import quote, urlparse
 import shutil
 import secrets
@@ -473,6 +474,25 @@ def _ensure_password():
     )
 
 
+def _sync_admin_password_fingerprint():
+    admin_pw = os.environ.get('ADMIN_PASSWORD', '').strip()
+    if not admin_pw:
+        return
+    key = app.secret_key if isinstance(app.secret_key, bytes) else str(app.secret_key).encode()
+    fingerprint = hmac.new(key, admin_pw.encode(), hashlib.sha256).hexdigest()
+    try:
+        stored = load_settings().get('admin_password_fp', '')
+        if stored and hmac.compare_digest(stored, fingerprint):
+            return
+        if stored:
+            _settings.bump_session_epoch(admin_password_fp=fingerprint)
+            logger.warning("ADMIN_PASSWORD changed since the last start, so every browser session was signed out")
+        else:
+            update_settings(admin_password_fp=fingerprint)
+    except Exception:
+        logger.exception("Could not record the ADMIN_PASSWORD fingerprint")
+
+
 def _read_traefik_labels():
     try:
         import docker as _docker
@@ -528,6 +548,7 @@ if _s.get('oidc_enabled') and not _s.get('oidc_allowed_emails', '').strip() and 
 logger.info("===========================================")
 
 _ensure_password()
+_sync_admin_password_fingerprint()
 
 
 @app.context_processor
@@ -726,15 +747,48 @@ def set_security_headers(response):
 def _close_reset_window(settings):
     if not settings.get('setup_password_reset'):
         return
-    save_settings(
-        domains=settings['domains'], cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings.get('auth_enabled', True),
-        password_hash=settings.get('password_hash', ''),
-        visible_tabs=settings['visible_tabs'],
-        setup_password_reset=False,
-    )
-    logger.warning("Password reset window closed after a successful login")
+    update_settings(setup_password_reset=False)
+    logger.warning("Password reset window closed after a successful sign-in")
+
+
+def _start_session(remember=False, extra=None, notify=True, note=None):
+    values = {'authenticated': True,
+              'last_active': time.time(),
+              'login_time': datetime.now(timezone.utc).isoformat()}
+    values.update(extra or {})
+    session.clear()
+    session.update(values)
+    session.permanent = bool(remember)
+    _auth._stamp_session()
+    if notify:
+        add_notification('info', note or f"Login from {request.remote_addr}", category='security')
+    _close_reset_window(load_settings())
+
+
+_PASSWORD_CHANGE_EXEMPT = {
+    'static', 'login', 'login_otp', 'logout', 'setup', 'force_change_password',
+    'api_change_password', 'api_health', 'oidc_login', 'oidc_callback',
+    'setup_test_git', 'setup_test_crowdsec', 'api_setup_test_connection',
+}
+
+
+@app.before_request
+def _require_password_change():
+    if request.endpoint is None or request.endpoint in _PASSWORD_CHANGE_EXEMPT:
+        return None
+    if request.headers.get('X-Api-Key'):
+        return None
+    _auth._drop_stale_session()
+    if not session.get('authenticated') or os.environ.get('ADMIN_PASSWORD', '').strip():
+        return None
+    if session.get('auth_method') == 'oidc' or not _auth_enabled():
+        return None
+    settings = load_settings()
+    if not settings.get('must_change_password'):
+        return None
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'password change required'}), 403
+    return redirect(url_for('force_change_password') if settings.get('setup_complete') else url_for('setup'))
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -783,18 +837,12 @@ def login():
                 session['otp_next']     = request.form.get('next') or ''
                 session['otp_must_change'] = settings.get('must_change_password', False)
                 session['otp_setup_complete'] = settings.get('setup_complete', False)
+                session['otp_epoch'] = int(settings.get('session_epoch') or 0)
                 logger.info(f"OTP step required for login from {request.remote_addr}")
                 return redirect(url_for('login_otp'))
 
-            _vals = {'authenticated': True,
-                     'last_active': time.time(),
-                     'login_time': datetime.now(timezone.utc).isoformat()}
-            session.clear()
-            session.update(_vals)
-            session.permanent = remember
+            _start_session(remember)
             logger.info(f"Successful login from {request.remote_addr}")
-            add_notification('info', f"Login from {request.remote_addr}", category='security')
-            _close_reset_window(settings)
 
             if settings.get('must_change_password', False) and not admin_pw:
                 if not settings.get('setup_complete', False):
@@ -823,6 +871,7 @@ def login():
 
 
 @app.route('/setup', methods=['GET', 'POST'])
+@limiter.limit("5 per minute", methods=["POST"])
 def setup():
     if not _auth_required():
         return redirect(url_for('index'))
@@ -830,6 +879,7 @@ def setup():
     current = load_settings()
 
     reset_mode = bool(current.get('setup_password_reset', False))
+    otp_required = bool(current.get('otp_enabled') and current.get('otp_secret'))
 
     if not reset_mode:
         if current.get('setup_complete', False):
@@ -842,33 +892,44 @@ def setup():
 
     if reset_mode and request.method == 'POST':
         _check_csrf()
+        refusal = None
+        if os.environ.get('ADMIN_PASSWORD', '').strip():
+            refusal = 'ADMIN_PASSWORD is set, so a password saved here would never be used. Change that variable and restart instead.'
+        elif not _auth_enabled():
+            refusal = 'Local password login is turned off. Sign in with your identity provider.'
+        if refusal:
+            update_settings(setup_password_reset=False)
+            logger.warning(f"Password reset refused from {request.remote_addr}: {refusal}")
+            flash(refusal, 'error')
+            return redirect(url_for('login'))
         new_pw  = request.form.get('password', '')
         confirm = request.form.get('confirm', '')
         err = _password_error(new_pw)
         if not err and new_pw != confirm:
             err = 'Passwords do not match.'
+        if not err and otp_required:
+            code = request.form.get('code', '').strip()
+            try:
+                import pyotp
+                code_ok = bool(code) and pyotp.TOTP(current['otp_secret']).verify(code, valid_window=1)
+            except Exception:
+                logger.exception("OTP verify error during a password reset")
+                code_ok = False
+            if not code_ok:
+                err = 'Enter the current code from your authenticator app.'
+                logger.warning(f"Password reset with a wrong two-factor code from {request.remote_addr}")
         if err:
             return render_template('login.html', setup_mode=True, reset_mode=True,
                                    error=err, csrf_token=_get_csrf_token(),
                                    defaults={'domains': current['domains'],
                                              'cert_resolver': current['cert_resolver'],
                                              'traefik_api_url': current['traefik_api_url']},
-                                   temp_password_mode=False,
+                                   temp_password_mode=False, otp_required=otp_required,
                                    detected_self_domain='', detected_self_svc='',
                                    detected_self_entry_point='')
-        save_settings(
-            domains=current['domains'],
-            cert_resolver=current['cert_resolver'],
-            traefik_api_url=current['traefik_api_url'],
-            auth_enabled=current.get('auth_enabled', True),
-            password_hash=_hash_password(new_pw),
-            visible_tabs=current['visible_tabs'],
-            must_change_password=False,
-            setup_password_reset=False,
-        )
-        session.clear()
-        session['authenticated'] = True
-        session['login_time'] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
+        _settings.bump_session_epoch(password_hash=_hash_password(new_pw),
+                                     must_change_password=False, setup_password_reset=False)
+        _start_session(False, notify=False)
         logger.warning(f"Password reset completed from {request.remote_addr}")
         return redirect(url_for('index'))
 
@@ -980,17 +1041,13 @@ def setup():
             if temp_password_mode:
                 return redirect(url_for('force_change_password'))
 
-            session.clear()
-            session.permanent        = True
-            session['authenticated'] = True
-            session['last_active']   = time.time()
-            session['login_time']    = datetime.now(timezone.utc).isoformat()
+            _start_session(True, notify=False)
             return redirect(url_for('index'))
 
     detected_domain, detected_svc = _detect_setup_self_route()
     detected_entry_point = load_settings().get('self_route', {}).get('entry_point', '') or _best_entrypoint()
     return render_template('login.html', setup_mode=True, error=error,
-                           reset_mode=reset_mode,
+                           reset_mode=reset_mode, otp_required=otp_required,
                            defaults=defaults, csrf_token=_get_csrf_token(),
                            temp_password_mode=temp_password_mode,
                            detected_self_domain=detected_domain,
@@ -1076,17 +1133,13 @@ def force_change_password():
         if not error and new_pw != confirm:
             error = 'Passwords do not match.'
         if not error:
-            save_settings(
-                domains=settings['domains'],
-                cert_resolver=settings['cert_resolver'],
-                traefik_api_url=settings['traefik_api_url'],
-                auth_enabled=settings['auth_enabled'],
+            _settings.bump_session_epoch(
                 password_hash=_hash_password(new_pw),
-                visible_tabs=settings['visible_tabs'],
                 must_change_password=False,
                 setup_password_reset=False,
                 setup_complete=True,
             )
+            _auth._stamp_session()
             logger.info(f"Forced password change completed from {request.remote_addr}")
             return redirect(url_for('index'))
 
@@ -1140,13 +1193,8 @@ def reset_password_cli(disable_otp, prompt_pw, from_stdin, password_opt):
                 'Change or unset that variable instead, or this password will not work.')
 
     settings = load_settings()
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings.get('auth_enabled', True),
+    _settings.bump_session_epoch(
         password_hash=_hash_password(password),
-        visible_tabs=settings['visible_tabs'],
         must_change_password=False if explicit else True,
         setup_password_reset=False if explicit else True,
         setup_complete=settings.get('setup_complete', True),
@@ -1196,16 +1244,10 @@ def api_change_password():
         logger.warning(f"Failed password change attempt from {request.remote_addr}")
         return jsonify({'error': 'Current password is incorrect.'}), 403
 
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=_hash_password(new_pw),
-        visible_tabs=settings['visible_tabs'],
-        must_change_password=False,
-        setup_password_reset=False,
-    )
+    _settings.bump_session_epoch(password_hash=_hash_password(new_pw),
+                                 must_change_password=False, setup_password_reset=False)
+    if session.get('authenticated'):
+        _auth._stamp_session()
     logger.info(f"Password changed successfully from {request.remote_addr}")
     return jsonify({'success': True})
 
@@ -1264,19 +1306,18 @@ def login_otp():
         except Exception:
             logger.exception("OTP verify error - secret may be corrupt")
             otp_valid = False
+        if otp_valid and int(session.get('otp_epoch') or 0) != int(settings.get('session_epoch') or 0):
+            session.clear()
+            logger.warning(f"OTP sign-in from {request.remote_addr} abandoned, the password changed after the password step")
+            flash('Your password was changed while you were signing in. Sign in again.', 'error')
+            return redirect(url_for('login'))
         if otp_valid:
             remember       = session.get('otp_remember', True)
             must_change    = session.get('otp_must_change', False)
             setup_complete = session.get('otp_setup_complete', False)
             next_url       = session.get('otp_next', '') or url_for('index')
-            _vals = {'authenticated': True,
-                     'last_active': time.time(),
-                     'login_time': datetime.now(timezone.utc).isoformat()}
-            session.clear()
-            session.update(_vals)
-            session.permanent = remember
+            _start_session(remember)
             logger.info(f"Successful OTP login from {request.remote_addr}")
-            add_notification('info', f"Login from {request.remote_addr}", category='security')
             if must_change:
                 if not setup_complete:
                     return redirect(url_for('setup'))
@@ -1323,9 +1364,22 @@ def api_otp_enable():
 @csrf_protect
 @login_required
 def api_otp_disable():
-    update_settings(otp_secret='',
-                    otp_enabled=False)
+    _settings.bump_session_epoch(otp_secret='', otp_enabled=False)
+    if session.get('authenticated'):
+        _auth._stamp_session()
     logger.info(f"OTP disabled by {request.remote_addr}")
+    return jsonify({'success': True})
+
+
+@app.route('/api/auth/sessions/revoke', methods=['POST'])
+@csrf_protect
+@login_required
+def api_revoke_sessions():
+    _settings.bump_session_epoch()
+    if session.get('authenticated'):
+        _auth._stamp_session()
+    logger.warning(f"Every other session was signed out from {request.remote_addr}")
+    add_notification('warning', f"Every other session was signed out from {request.remote_addr}", category='security')
     return jsonify({'success': True})
 
 
@@ -6924,16 +6978,9 @@ def oidc_callback():
         logger.warning(f"OIDC login denied for {email!r} - no matching group")
         flash("Your account is not authorized to access this application.", "error")
         return redirect(url_for('login'))
-    session.clear()
-    session.update({
-        'authenticated': True,
-        'last_active':   time.time(),
-        'login_time':    datetime.now(timezone.utc).isoformat(),
-        'oidc_email':    email,
-        'oidc_name':     name,
-    })
+    _start_session(False, {'oidc_email': email, 'oidc_name': name, 'auth_method': 'oidc'},
+                   note=f"OIDC login: {email} from {request.remote_addr}")
     logger.info(f"OIDC login success for {email!r} from {request.remote_addr}")
-    add_notification('info', f"OIDC login: {email} from {request.remote_addr}", category='security')
     return redirect(url_for('index'))
 
 
