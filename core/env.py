@@ -73,6 +73,31 @@ def peer_is_trusted(addr) -> bool:
         ip = mapped
     return any(ip.version == net.version and ip in net for net in TRUSTED_PROXIES)
 
+
+DEFAULT_LOGIN_FAILURE_LIMIT = '30 per minute;200 per hour'
+DEFAULT_OTP_FAILURE_LIMIT = '10 per minute;30 per hour'
+
+
+def failure_limit(name, default) -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if raw.lower() in ('', '0', 'off', 'false', 'none'):
+        return ''
+    try:
+        from limits import parse_many
+        if not parse_many(raw):
+            raise ValueError(raw)
+    except Exception:
+        logger.warning(f"{name}: {raw!r} is not a rate limit like '30 per minute;200 per hour', using {default!r}")
+        return default
+    return raw
+
+
+LOGIN_FAILURE_LIMIT = failure_limit('LOGIN_FAILURE_LIMIT', DEFAULT_LOGIN_FAILURE_LIMIT)
+OTP_FAILURE_LIMIT = failure_limit('OTP_FAILURE_LIMIT', DEFAULT_OTP_FAILURE_LIMIT)
+
 BACKUP_DIR         = os.environ.get('BACKUP_DIR',    '/app/backups')
 SETTINGS_PATH      = os.environ.get('SETTINGS_PATH', '/app/config/manager.yml')
 CONFIG_DIR         = os.path.dirname(os.path.abspath(SETTINGS_PATH))

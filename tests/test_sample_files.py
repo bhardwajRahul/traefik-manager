@@ -28,6 +28,7 @@ def _host_env_vars():
         found |= set(re.findall(r"environ\[\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
         found |= set(re.findall(r"_env_bool\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
         found |= set(re.findall(r"_cs_int_env\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
+        found |= set(re.findall(r"failure_limit\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
         found |= set(re.findall(r"_int\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
     return found - RUNTIME_SUPPLIED
 

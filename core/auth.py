@@ -1,5 +1,6 @@
 import os
 import secrets
+import threading
 import time
 from functools import wraps
 
@@ -105,6 +106,55 @@ def _check_inactivity():
         session.clear()
         return
     session['last_active'] = now
+
+OTP_MAX_ATTEMPTS = 5
+OTP_PENDING_SECONDS = 600
+_OTP_TRACK_CAP = 10000
+_otp_attempts = {}
+_otp_lock = threading.Lock()
+
+
+def start_otp_attempt():
+    session['otp_nonce'] = secrets.token_urlsafe(18)
+    session['otp_started'] = int(time.time())
+
+
+def otp_attempt_expired() -> bool:
+    started = session.get('otp_started')
+    if not session.get('otp_nonce') or not isinstance(started, int):
+        return True
+    if time.time() - started > OTP_PENDING_SECONDS:
+        return True
+    with _otp_lock:
+        return _otp_attempts.get(session['otp_nonce'], (0, 0))[0] >= OTP_MAX_ATTEMPTS
+
+
+def record_otp_failure() -> int:
+    nonce = session.get('otp_nonce') or ''
+    now = time.time()
+    with _otp_lock:
+        if len(_otp_attempts) >= _OTP_TRACK_CAP:
+            for key, (_, first) in list(_otp_attempts.items()):
+                if now - first > OTP_PENDING_SECONDS:
+                    del _otp_attempts[key]
+            while len(_otp_attempts) >= _OTP_TRACK_CAP:
+                del _otp_attempts[next(iter(_otp_attempts))]
+        count, first = _otp_attempts.get(nonce, (0, now))
+        _otp_attempts[nonce] = (count + 1, first)
+        return count + 1
+
+
+def forget_otp_attempt():
+    nonce = session.get('otp_nonce')
+    if nonce:
+        with _otp_lock:
+            _otp_attempts.pop(nonce, None)
+
+
+def reset_otp_attempts():
+    with _otp_lock:
+        _otp_attempts.clear()
+
 
 def _check_api_key() -> bool:
     key = request.headers.get('X-Api-Key', '')

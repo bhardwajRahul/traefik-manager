@@ -112,6 +112,8 @@ from `manager.yml` and restart.
 |---|---|---|---|
 | `SECRET_KEY` | _(auto-generated)_ | - | Flask session signing key |
 | `INACTIVITY_TIMEOUT_MINUTES` | `120` | - | Log out after this many minutes of inactivity |
+| `LOGIN_FAILURE_LIMIT` | `30 per minute;200 per hour` | - | Wrong passwords allowed across all addresses before login is paused. Empty or `off` disables |
+| `OTP_FAILURE_LIMIT` | `10 per minute;30 per hour` | - | Wrong 2FA codes allowed across all addresses before the code step is paused. Empty or `off` disables |
 | `OTP_ENCRYPTION_KEY` | _(auto-generated)_ | - | Fernet key for every secret stored encrypted in `manager.yml` |
 | `PROXY_FIX_HOPS` | `1` | - | Number of trusted proxy hops in front of Traefik Manager for `X-Forwarded-For` |
 | `TRUSTED_PROXIES` | loopback, private and CGNAT ranges | - | Addresses allowed to set `X-Forwarded-For`, `-Proto` and `-Host`. `*` trusts every peer |

@@ -12,7 +12,9 @@ Traefik Manager is designed to run behind a reverse proxy on a trusted network. 
 
 The login password is hashed with **bcrypt at cost 12** before storage in `manager.yml`. The plaintext password is never written to disk. Passwords must be at least 8 characters and at most 72 bytes, which is the bcrypt limit - accented and non-Latin characters take more than one byte each.
 
-Login POSTs are rate-limited to **5 per minute per IP**, successful or not.
+Login POSTs are rate-limited to **5 per minute per IP**, successful or not. Wrong passwords from all addresses together are capped by [`LOGIN_FAILURE_LIMIT`](env-vars.md#security), and wrong 2FA codes by [`OTP_FAILURE_LIMIT`](env-vars.md#security).
+
+After the password step, 5 wrong 2FA codes or 10 minutes send you back to the password step.
 
 While [`ADMIN_PASSWORD`](env-vars.md#admin-password) is set, login compares that plaintext value instead of the stored hash, and 2FA and the in-UI password change have no effect. `flask reset-password` with `--prompt`, `--stdin` or `--password` exits with an error and writes nothing; with no password option it still writes a temporary password, which login then ignores.
 
@@ -124,6 +126,8 @@ When an external provider such as Authentik, Authelia, or Keycloak already prote
 | Endpoint | Limit |
 |---|---|
 | Login, OTP verification | 5 / min per IP |
+| Wrong passwords, all addresses | 30 / min, 200 / hour (`LOGIN_FAILURE_LIMIT`) |
+| Wrong 2FA codes, all addresses | 10 / min, 30 / hour (`OTP_FAILURE_LIMIT`) |
 | OIDC login initiation | 10 / min per IP |
 | Password change | 10 / min per IP |
 | Backup restore | 10 / min per IP |

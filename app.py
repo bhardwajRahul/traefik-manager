@@ -347,6 +347,23 @@ from flask_limiter.util import get_remote_address
 limiter = Limiter(get_remote_address, app=app, default_limits=[], storage_uri="memory://")
 
 
+def _failed_sign_in(response):
+    return response.status_code == 200
+
+
+_login_failure_limit = limiter.shared_limit(
+    lambda: env.LOGIN_FAILURE_LIMIT or env.DEFAULT_LOGIN_FAILURE_LIMIT, scope='login-failures',
+    key_func=lambda: 'account', methods=['POST'], deduct_when=_failed_sign_in,
+    exempt_when=lambda: not env.LOGIN_FAILURE_LIMIT,
+    error_message='Too many failed sign-in attempts. Try again later.')
+
+_otp_failure_limit = limiter.shared_limit(
+    lambda: env.OTP_FAILURE_LIMIT or env.DEFAULT_OTP_FAILURE_LIMIT, scope='otp-failures',
+    key_func=lambda: 'account', methods=['POST'], deduct_when=_failed_sign_in,
+    exempt_when=lambda: not env.OTP_FAILURE_LIMIT,
+    error_message='Too many failed two-factor codes. Try again later.')
+
+
 BACKUP_DIR         = env.BACKUP_DIR
 SETTINGS_PATH      = env.SETTINGS_PATH
 _CONFIG_DIR        = env.CONFIG_DIR
@@ -806,6 +823,7 @@ def _require_password_change():
 
 @app.route('/login', methods=['GET', 'POST'])
 @limiter.limit("5 per minute", methods=["POST"])
+@_login_failure_limit
 def login():
 
     if not _auth_required():
@@ -851,6 +869,7 @@ def login():
                 session['otp_must_change'] = settings.get('must_change_password', False)
                 session['otp_setup_complete'] = settings.get('setup_complete', False)
                 session['otp_epoch'] = int(settings.get('session_epoch') or 0)
+                _auth.start_otp_attempt()
                 logger.info(f"OTP step required for login from {request.remote_addr}")
                 return redirect(url_for('login_otp'))
 
@@ -1313,8 +1332,13 @@ def api_auth_external_ack():
 
 @app.route('/login/otp', methods=['GET', 'POST'])
 @limiter.limit("5 per minute", methods=["POST"])
+@_otp_failure_limit
 def login_otp():
     if not session.get('otp_pending'):
+        return redirect(url_for('login'))
+    if _auth.otp_attempt_expired():
+        session.clear()
+        flash('Your sign-in expired. Enter your password again.', 'error')
         return redirect(url_for('login'))
 
     error = None
@@ -1339,6 +1363,7 @@ def login_otp():
             must_change    = session.get('otp_must_change', False)
             setup_complete = session.get('otp_setup_complete', False)
             next_url       = session.get('otp_next', '') or url_for('index')
+            _auth.forget_otp_attempt()
             _start_session(remember)
             logger.info(f"Successful OTP login from {request.remote_addr}")
             if must_change:
@@ -1347,8 +1372,12 @@ def login_otp():
                 return redirect(url_for('force_change_password'))
             return redirect(_safe_next(next_url))
         else:
-            error = 'Invalid code. Please try again.'
             logger.warning(f"Failed OTP attempt from {request.remote_addr}")
+            if _auth.record_otp_failure() >= _auth.OTP_MAX_ATTEMPTS:
+                session.clear()
+                flash('Too many wrong codes. Enter your password again.', 'error')
+                return redirect(url_for('login'))
+            error = 'Invalid code. Please try again.'
 
     return render_template('login.html', otp_mode=True, error=error,
                            csrf_token=_get_csrf_token())

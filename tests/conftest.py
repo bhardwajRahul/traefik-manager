@@ -68,6 +68,8 @@ def _reset_rate_limits():
         _app.limiter.reset()
     except Exception:
         pass
+    from core import auth as _auth_mod
+    _auth_mod.reset_otp_attempts()
 
 
 def _reset_settings():
