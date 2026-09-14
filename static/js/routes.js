@@ -1254,7 +1254,7 @@ async function _initEntrypointChips(proto, selectedEntrypoints) {
     const eps = (epList || []).map(e => e.name || e).filter(Boolean);
     const isSingle = proto === 'udp';
     if (!eps.length) {
-        container.innerHTML = `<input type="text" id="${hiddenId}_fallback" class="input-field" placeholder="${proto === 'http' ? 'https' : proto}" style="flex:1" oninput="document.getElementById('${hiddenId}').value=this.value">`;
+        container.innerHTML = `<input type="text" id="${hiddenId}_fallback" class="input-field" placeholder="${proto === 'http' ? 'https' : proto}" style="flex:1" oninput="document.getElementById(${_jsArg(hiddenId)}).value=this.value">`;
         hidden.value = selectedEntrypoints ? (isSingle ? (selectedEntrypoints[0] || '') : selectedEntrypoints.join(', ')) : (proto === 'http' ? 'https' : '');
         return;
     }
@@ -1274,7 +1274,7 @@ async function _initEntrypointChips(proto, selectedEntrypoints) {
             const bgColor = on ? (isOrphan ? 'rgba(234,179,8,0.12)' : 'rgba(34,197,94,0.12)') : 'transparent';
             const textColor = on ? (isOrphan ? 'var(--yellow,#eab308)' : 'var(--green)') : 'var(--muted)';
             const titleAttr = isOrphan ? `${_esc(ep)} (not found in Traefik entrypoints - click to remove)` : _esc(ep);
-            return `<button type="button" onclick="_toggleEpChip(this,${_jsArg(ep)},'${proto}')" style="padding:3px 10px;border-radius:6px;border:1px solid ${borderColor};background:${bgColor};color:${textColor};font-size:12px;font-family:monospace;cursor:pointer" title="${titleAttr}">${_esc(ep)}</button>`;
+            return `<button type="button" onclick="_toggleEpChip(this,${_jsArg(ep)},${_jsArg(proto)})" style="padding:3px 10px;border-radius:6px;border:1px solid ${borderColor};background:${bgColor};color:${textColor};font-size:12px;font-family:monospace;cursor:pointer" title="${titleAttr}">${_esc(ep)}</button>`;
         }).join('');
     }
     render();
@@ -1318,7 +1318,7 @@ async function _initMiddlewareChips(selectedMiddlewares, proto) {
     });
     const mws = [...byBase.values()];
     if (!mws.length) {
-        container.innerHTML = `<input type="text" class="input-field" style="flex:1" placeholder="${proto === 'tcp' ? 'tcp-lan-only@file' : 'auth@file, redirect-https'}" oninput="document.getElementById('${hiddenId}').value=this.value">`;
+        container.innerHTML = `<input type="text" class="input-field" style="flex:1" placeholder="${proto === 'tcp' ? 'tcp-lan-only@file' : 'auth@file, redirect-https'}" oninput="document.getElementById(${_jsArg(hiddenId)}).value=this.value">`;
         hidden.value = selectedMiddlewares ? selectedMiddlewares.join(', ') : '';
         return;
     }
@@ -1337,7 +1337,7 @@ async function _initMiddlewareChips(selectedMiddlewares, proto) {
         const hiddenCount = all.length - unsel.length;
         const chip = (mw, i, on) => {
             const label = mw.split('@')[0];
-            return `<button type="button" onclick="_toggleMwChip(${_jsArg(mw)},'${proto}')" class="mw-chip${on ? ' on' : ''}" title="${_esc(mw)}">${on ? (i + 1) + '. ' : ''}${_esc(label)}</button>`;
+            return `<button type="button" onclick="_toggleMwChip(${_jsArg(mw)},${_jsArg(proto)})" class="mw-chip${on ? ' on' : ''}" title="${_esc(mw)}">${on ? (i + 1) + '. ' : ''}${_esc(label)}</button>`;
         };
         const divider = sel.length > 0 && unsel.length > 0
             ? `<span style="align-self:center;width:1px;height:18px;background:var(--border);margin:0 2px;flex-shrink:0"></span>`

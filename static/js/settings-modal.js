@@ -181,10 +181,10 @@ async function loadGitCommits() {
                     <div class="sc-set-d">${c.timestamp}</div>
                 </div>
                 <div class="sc-set-v">
-                    <button onclick="gitViewDiff('${c.sha}')" class="btn-secondary text-xs py-1 px-2" title="View diff">
+                    <button onclick="gitViewDiff(${_jsArg(c.sha)})" class="btn-secondary text-xs py-1 px-2" title="View diff">
                         <i class="ph-bold ph-code text-xs"></i>
                     </button>
-                    <button onclick="gitRestoreCommit('${c.sha}', '${c.sha_short}')" class="btn-secondary text-xs py-1 px-2.5">
+                    <button onclick="gitRestoreCommit(${_jsArg(c.sha)}, ${_jsArg(c.sha_short)})" class="btn-secondary text-xs py-1 px-2.5">
                         <i class="ph-bold ph-arrow-counter-clockwise text-xs"></i> Restore
                     </button>
                 </div>
@@ -886,10 +886,10 @@ async function loadChannelsList() {
                     <div class="sc-set-d">${detail}</div>
                 </div>
                 <div class="sc-set-v">
-                    <div class="toggle-switch${c.enabled ? ' on' : ''}" onclick="toggleChannelEnabled('${c.id}')" title="Enabled"><div class="toggle-knob"></div></div>
-                    <button onclick="testChannelRow('${c.id}')" class="btn-icon" title="Send test"><i class="ph-bold ph-paper-plane-tilt text-xs"></i></button>
-                    <button onclick="editChannel('${c.id}')" class="btn-icon" title="Edit"><i class="ph-bold ph-gear text-xs"></i></button>
-                    <button onclick="deleteChannel('${c.id}')" class="btn-icon" title="Remove" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button>
+                    <div class="toggle-switch${c.enabled ? ' on' : ''}" onclick="toggleChannelEnabled(${_jsArg(c.id)})" title="Enabled"><div class="toggle-knob"></div></div>
+                    <button onclick="testChannelRow(${_jsArg(c.id)})" class="btn-icon" title="Send test"><i class="ph-bold ph-paper-plane-tilt text-xs"></i></button>
+                    <button onclick="editChannel(${_jsArg(c.id)})" class="btn-icon" title="Edit"><i class="ph-bold ph-gear text-xs"></i></button>
+                    <button onclick="deleteChannel(${_jsArg(c.id)})" class="btn-icon" title="Remove" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button>
                 </div>
             </div>`;
         }).join('');
@@ -905,13 +905,13 @@ function _channelById(id) {
 function _renderChannelChips() {
     const cats = document.getElementById('chCategories');
     if (cats) cats.innerHTML = Object.keys(CHANNEL_CATEGORY_LABELS).map(c =>
-        `<button type="button" class="agent-chip${_chCats.includes(c) ? ' active' : ''}" onclick="toggleChannelCategory('${c}')">${CHANNEL_CATEGORY_LABELS[c]}</button>`).join('');
+        `<button type="button" class="agent-chip${_chCats.includes(c) ? ' active' : ''}" onclick="toggleChannelCategory(${_jsArg(c)})">${CHANNEL_CATEGORY_LABELS[c]}</button>`).join('');
     const sev = document.getElementById('chSeverity');
     if (sev) sev.innerHTML = Object.keys(CHANNEL_SEVERITY_LABELS).map(s =>
-        `<button type="button" class="agent-chip${_chSeverity === s ? ' active' : ''}" onclick="selectChannelSeverity('${s}')">${CHANNEL_SEVERITY_LABELS[s]}</button>`).join('');
+        `<button type="button" class="agent-chip${_chSeverity === s ? ' active' : ''}" onclick="selectChannelSeverity(${_jsArg(s)})">${CHANNEL_SEVERITY_LABELS[s]}</button>`).join('');
     const dig = document.getElementById('chDigest');
     if (dig) dig.innerHTML = Object.keys(CHANNEL_DIGEST_LABELS).map(d =>
-        `<button type="button" class="agent-chip${_chDigest === d ? ' active' : ''}" onclick="selectChannelDigest('${d}')">${CHANNEL_DIGEST_LABELS[d]}</button>`).join('');
+        `<button type="button" class="agent-chip${_chDigest === d ? ' active' : ''}" onclick="selectChannelDigest(${_jsArg(d)})">${CHANNEL_DIGEST_LABELS[d]}</button>`).join('');
 }
 
 function toggleChannelCategory(cat) {
@@ -1186,7 +1186,7 @@ function renderBrowserNotifs() {
     if (fld) fld.style.display = on ? '' : 'none';
     const sev = document.getElementById('browserNotifSeverity');
     if (sev) sev.innerHTML = Object.keys(BROWSER_NOTIF_SEVERITY_LABELS).map(s =>
-        `<button type="button" class="agent-chip${browserNotifSeverity() === s ? ' active' : ''}" onclick="selectBrowserNotifSeverity('${s}')">${BROWSER_NOTIF_SEVERITY_LABELS[s]}</button>`).join('');
+        `<button type="button" class="agent-chip${browserNotifSeverity() === s ? ' active' : ''}" onclick="selectBrowserNotifSeverity(${_jsArg(s)})">${BROWSER_NOTIF_SEVERITY_LABELS[s]}</button>`).join('');
     if (!support.ok) { _browserNotifNote(BROWSER_NOTIF_NOTES[support.reason], 'var(--yellow)'); return; }
     if (Notification.permission === 'denied') { _browserNotifNote(BROWSER_NOTIF_NOTES.denied, 'var(--yellow)'); return; }
     _browserNotifNote('');
@@ -1422,18 +1422,18 @@ function _renderBackupList(containerId, backups) {
     list.innerHTML = backups.map(b => `
         <div class="sc-set">
             <div class="sc-set-l">
-                <div class="sc-set-n">${b.name}</div>
-                <div class="sc-set-d">${b.modified} · ${formatBytes(b.size)}</div>
+                <div class="sc-set-n">${_esc(b.name)}</div>
+                <div class="sc-set-d">${_esc(b.modified)} · ${_esc(formatBytes(Number(b.size) || 0))}</div>
             </div>
             <div class="sc-set-v">
                 ${b.restoreBlocked
                     ? `<button class="btn-secondary text-xs py-1 px-2.5" disabled style="opacity:.5;cursor:not-allowed" title="This agent is running an older version that restores static backups to the wrong path. Update the agent, then restore.">
                         <i class="ph-bold ph-arrow-counter-clockwise text-xs"></i> Restore
                     </button>`
-                    : `<button onclick="restoreBackup('${b.name}')" class="btn-secondary text-xs py-1 px-2.5">
+                    : `<button onclick="restoreBackup(${_jsArg(b.name)})" class="btn-secondary text-xs py-1 px-2.5">
                     <i class="ph-bold ph-arrow-counter-clockwise text-xs"></i> Restore
                 </button>`}
-                <button onclick="deleteBackup('${b.name}')" class="btn-icon" title="Delete" style="color:var(--red)">
+                <button onclick="deleteBackup(${_jsArg(b.name)})" class="btn-icon" title="Delete" style="color:var(--red)">
                     <i class="ph-bold ph-trash text-sm"></i>
                 </button>
             </div>
@@ -2152,9 +2152,9 @@ async function loadAgentsList() {
                     </div>
                 </div>
                 <div class="sc-set-v">
-                    <button onclick="openAgentKeys('${a.id}',${_jsArg(a.name)})" class="btn-icon" title="API Keys"><i class="ph-bold ph-key text-xs"></i></button>
-                    <button onclick="openAgentSetup('${a.id}')" class="btn-icon" title="Edit Settings"><i class="ph-bold ph-gear text-xs"></i></button>
-                    <button onclick="deleteAgent('${a.id}',${_jsArg(a.name)})" class="btn-icon" title="Remove" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button>
+                    <button onclick="openAgentKeys(${_jsArg(a.id)},${_jsArg(a.name)})" class="btn-icon" title="API Keys"><i class="ph-bold ph-key text-xs"></i></button>
+                    <button onclick="openAgentSetup(${_jsArg(a.id)})" class="btn-icon" title="Edit Settings"><i class="ph-bold ph-gear text-xs"></i></button>
+                    <button onclick="deleteAgent(${_jsArg(a.id)},${_jsArg(a.name)})" class="btn-icon" title="Remove" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button>
                 </div>
             </div>`).join('');
         agents.forEach(a => pingAgent(a.id, a.url));
@@ -2203,7 +2203,7 @@ async function loadAgentKeys() {
                     <div class="sc-set-n">${_esc(k.name)}</div>
                     <div class="sc-set-d">Created ${new Date(k.created_at).toLocaleDateString()}${k.last_used_at ? ' &middot; Last used ' + new Date(k.last_used_at).toLocaleDateString() : ''}</div>
                 </div>
-                <div class="sc-set-v"><button onclick="deleteAgentKey('${_keysAgentId}','${k.id}',${_jsArg(k.name)})" class="btn-icon flex-shrink-0" title="Revoke" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button></div>
+                <div class="sc-set-v"><button onclick="deleteAgentKey(${_jsArg(_keysAgentId)},${_jsArg(k.id)},${_jsArg(k.name)})" class="btn-icon flex-shrink-0" title="Revoke" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button></div>
             </div>`).join('');
     } catch(e) {
         list.innerHTML = `<div class="text-xs" style="color:var(--red)">${_esc(_netErrText(e, 'Failed to load keys'))}</div>`;
@@ -2294,7 +2294,7 @@ async function loadActiveAgentKeys() {
                     <div class="sc-set-n">${_esc(k.name)}</div>
                     <div class="sc-set-d">Created ${new Date(k.created_at).toLocaleDateString()}${k.last_used_at ? ' &middot; Last used ' + new Date(k.last_used_at).toLocaleDateString() : ''}</div>
                 </div>
-                <div class="sc-set-v"><button onclick="deleteActiveAgentKey('${k.id}',${_jsArg(k.name)})" class="btn-icon flex-shrink-0" title="Revoke" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button></div>
+                <div class="sc-set-v"><button onclick="deleteActiveAgentKey(${_jsArg(k.id)},${_jsArg(k.name)})" class="btn-icon flex-shrink-0" title="Revoke" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button></div>
             </div>`).join('');
     } catch(e) {
         list.innerHTML = `<div class="text-xs" style="color:var(--red)">${_esc(_netErrText(e, 'Failed to load keys'))}</div>`;
@@ -3017,8 +3017,8 @@ async function loadTemplatesList() {
                     <span class="text-sm font-medium truncate" style="color:var(--text)">${_esc(t.name)}</span>
                 </div>
                 <div class="flex gap-1 flex-shrink-0">
-                    <button onclick="openTemplateEditor('${t.id}')" class="btn-icon text-xs" title="Edit"><i class="ph-bold ph-pencil text-xs"></i></button>
-                    <button onclick="deleteTemplate('${t.id}')" class="btn-icon text-xs" title="Delete" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button>
+                    <button onclick="openTemplateEditor(${_jsArg(t.id)})" class="btn-icon text-xs" title="Edit"><i class="ph-bold ph-pencil text-xs"></i></button>
+                    <button onclick="deleteTemplate(${_jsArg(t.id)})" class="btn-icon text-xs" title="Delete" style="color:var(--red)"><i class="ph-bold ph-trash text-xs"></i></button>
                 </div>
             </div>`).join('');
     } catch(e) {
@@ -3231,7 +3231,7 @@ function filterSettings() {
     empty.innerHTML = elsewhere.length
         ? 'No matches here. Found in '
           + elsewhere.map(e =>
-              `<button type="button" class="settings-jump" onclick="switchSettingsPanel('${e.id}')">`
+              `<button type="button" class="settings-jump" onclick="switchSettingsPanel(${_jsArg(e.id)})">`
               + `${_esc(e.label)} <span>${_esc(e.hits)}</span></button>`).join(' ')
         : 'No settings match your search';
 }

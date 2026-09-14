@@ -133,14 +133,14 @@ function renderServicesTable() {
     if (protoMenu) {
         protoMenu.innerHTML = ['all', ...uniqueProtos].map(p => {
             const label = p === 'all' ? 'All Protocols' : p;
-            return `<button class="live-dd-item${_protoLiveFilter === p ? ' active' : ''}" onclick="pickLiveProto('${p}','${label}')">${label}</button>`;
+            return `<button class="live-dd-item${_protoLiveFilter === p ? ' active' : ''}" onclick="pickLiveProto(${_jsArg(p)},${_jsArg(label)})">${_esc(label)}</button>`;
         }).join('');
     }
     const provMenu = document.getElementById('dd-provider-menu');
     if (provMenu) {
         provMenu.innerHTML = ['all', ...uniqueProviders].map(v => {
             const label = v === 'all' ? 'All Providers' : v;
-            return `<button class="live-dd-item${_providerFilter === v ? ' active' : ''}" onclick="pickLiveProvider('${v}','${label}')">${label}</button>`;
+            return `<button class="live-dd-item${_providerFilter === v ? ' active' : ''}" onclick="pickLiveProvider(${_jsArg(v)},${_jsArg(label)})">${_esc(label)}</button>`;
         }).join('');
     }
 

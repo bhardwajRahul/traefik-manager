@@ -1101,7 +1101,7 @@ function _geoPanelHtml(panelId, countryData, activeCC, onClearAttr) {
     const top = entries.slice(0, 8).map(([cc, d]) => {
         const sel = activeCC === cc;
         const pct = (d.count / total * 100).toFixed(1);
-        return `<div class="lg-row${sel ? ' lg-row-on' : ''}" role="button" tabindex="0" onclick="${panelId}_click('${cc}')" title="${_esc(d.name)} - ${d.count.toLocaleString()} requests, ${pct}%">
+        return `<div class="lg-row${sel ? ' lg-row-on' : ''}" role="button" tabindex="0" onclick="${panelId}_click(${_jsArg(cc)})" title="${_esc(d.name)} - ${d.count.toLocaleString()} requests, ${pct}%">
             <span class="lg-id"><span class="lg-g">${_flagEmoji(cc)}</span><span class="lg-name">${_esc(d.name)}</span></span>
             <span class="lg-bad"></span>
             <span class="lg-n">${d.count.toLocaleString()}</span>

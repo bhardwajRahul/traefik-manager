@@ -88,3 +88,48 @@ def test_no_inline_handler_passes_a_string_through_esc():
         'inline handlers must use ${_jsArg(v)}, not \'${_esc(v)}\' - '
         'the HTML parser decodes &#39; back to a quote before the JS is compiled. '
         'Offenders: ' + ', '.join(offenders))
+
+
+def _handler_offenders(paths, pattern):
+    offenders = []
+    for path in paths:
+        with open(path, encoding='utf-8') as fh:
+            for n, line in enumerate(fh, 1):
+                for handler in re.findall(r'on[a-z]+="[^"\n]*"', line):
+                    if re.search(pattern, handler):
+                        offenders.append('%s:%d' % (os.path.relpath(path, ROOT), n))
+    return offenders
+
+
+def _sources(*exts):
+    found = []
+    for base in (os.path.join(ROOT, 'static', 'js'), os.path.join(ROOT, 'templates')):
+        for dirpath, _dirs, files in os.walk(base):
+            found.extend(os.path.join(dirpath, f) for f in files if f.endswith(exts))
+    return sorted(found)
+
+
+def test_no_inline_handler_wraps_an_interpolation_in_quotes():
+    offenders = _handler_offenders(_sources('.js', '.html'), r"'\$\{")
+    assert not offenders, (
+        "an inline handler puts '${value}' inside quotes, so a value holding a quote ends the "
+        'string and runs as script. Pass it as ${_jsArg(value)} instead. Offenders: ' + ', '.join(offenders))
+
+
+def test_no_template_handler_wraps_a_jinja_value_in_quotes():
+    offenders = _handler_offenders(_sources('.html'), r"'\{\{")
+    assert not offenders, (
+        "Jinja escapes a quote to &#39;, which the HTML parser turns back into a quote before the "
+        "handler runs. Use a single-quoted attribute with {{ value|tojson }}. Offenders: " + ', '.join(offenders))
+
+
+def test_the_unused_static_config_cards_are_gone():
+    src = _read_js('static-config.js')
+    for name in ('_scRail', '_tmEpCard', '_tmResolverCard', '_tmPluginCard'):
+        assert 'function %s(' % name not in src, \
+            '%s was never called and carried an unescaped handler; it should not come back' % name
+
+
+def _read_js(name):
+    with open(os.path.join(ROOT, 'static', 'js', name), encoding='utf-8') as fh:
+        return fh.read()

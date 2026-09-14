@@ -16,7 +16,7 @@
                 <div class="live-dd-menu" id="dd-route-domain-menu">
                     <button class="live-dd-item active" onclick="pickRouteDomain('','All Domains')">All Domains</button>
                     {% for d in domains %}
-                    <button class="live-dd-item" onclick="pickRouteDomain('{{ d }}','{{ d }}')">{{ d }}</button>
+                    <button class="live-dd-item" onclick='pickRouteDomain({{ d|tojson }},{{ d|tojson }})'>{{ d }}</button>
                     {% endfor %}
                 </div>
             </div>

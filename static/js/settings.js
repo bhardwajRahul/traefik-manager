@@ -95,7 +95,7 @@ function _renderApiKeyList(keys) {
                 <div class="sc-set-n">${k.name.replace(/</g,'&lt;')}</div>
                 <div class="sc-set-d"><code class="font-mono" style="letter-spacing:.05em">${k.preview}</code></div>
             </div>
-            <div class="sc-set-v"><button onclick="revokeApiKey('${k.preview.replace(/'/g,"\\'")}')" class="nav-btn text-xs" style="color:var(--red);border-color:rgba(248,81,73,0.3);flex-shrink:0;"><i class="ph-bold ph-x"></i> Revoke</button></div>
+            <div class="sc-set-v"><button onclick="revokeApiKey(${_jsArg(k.preview)})" class="nav-btn text-xs" style="color:var(--red);border-color:rgba(248,81,73,0.3);flex-shrink:0;"><i class="ph-bold ph-x"></i> Revoke</button></div>
         </div>`).join('');
 }
 
