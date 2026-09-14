@@ -107,6 +107,15 @@ def test_the_setup_wizard_ticks_what_traefik_reports():
     assert '_paintSetupTabs();' in html, 'the toggles would read off while the value says on'
 
 
+def test_external_file_routes_compare_against_the_selected_server():
+    app_src = _read('app.py')
+    body = app_src[app_src.index('def api_manager_router_names():'):app_src.index("@app.route('/api/traefik/entrypoints')")]
+    assert "request.args.get('server'" in body and '_agent_load_configs(agent)' in body, \
+        'an agent would hide its own routes behind the names of the host config'
+    js = _read('static', 'js', 'tab-file_external.js')
+    assert "'/api/manager/router-names' + (_activeAgent ? '?server=' + encodeURIComponent(_activeAgent.id) : '')" in js
+
+
 def test_the_seen_list_is_stored_and_survives_a_reload():
     from core import settings as settings_mod
     src = _read('core', 'settings.py')

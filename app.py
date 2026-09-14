@@ -2052,10 +2052,18 @@ def api_middlewares():
 @app.route('/api/manager/router-names')
 @login_required
 def api_manager_router_names():
-    config = load_config()
+    server = str(request.args.get('server', '')).strip()
+    if server:
+        agent = _agent_by_id(server)
+        if not agent:
+            return jsonify({'error': 'Unknown server'}), 404
+        configs = list(_agent_load_configs(agent).values())
+    else:
+        configs = [load_config()]
     names = set()
-    for proto in ('http', 'tcp', 'udp'):
-        names.update(config.get(proto, {}).get('routers', {}).keys())
+    for config in configs:
+        for proto in ('http', 'tcp', 'udp'):
+            names.update(((config or {}).get(proto) or {}).get('routers', {}).keys())
     return jsonify(list(names))
 
 
