@@ -171,5 +171,6 @@ The clone paths are the same, relative to your `BACKUP_DIR` (default `/app/backu
 - The access token is stored encrypted in `manager.yml` using the same Fernet encryption used for other secrets (OIDC client secret, CrowdSec API key).
 - The token is never returned by the API - only a `git_backup_token_set: true/false` flag is exposed. It is also redacted from any git error message shown in the UI.
 - Use a token with the minimum required scope (repository write only). Do not use a full admin token.
+- Only dynamic config files (`.yml`, `.yaml`, `.toml`) and the static config are committed. Certificate stores never are.
 - Only the token configured here is used. Any git credential helper on the machine is ignored, so a token it holds is never sent to the backup remote and this token is never saved into it.
 - Use a **private** repository to keep your Traefik config off the public internet.

@@ -1010,6 +1010,11 @@ func (a *App) backupsListHandler(w http.ResponseWriter, r *http.Request) {
 	if a.cfg.StaticConfigPath != "" {
 		staticBase = filepath.Base(a.cfg.StaticConfigPath)
 	}
+	certNames := map[string]bool{}
+	for path, key := range acmeBackupKeys(acmeJSONPaths(a.cfg.ACMEJSONPath)) {
+		certNames[key] = true
+		certNames[filepath.Base(path)] = true
+	}
 	var list []backup
 	for _, e := range entries {
 		n := e.Name()
@@ -1024,7 +1029,9 @@ func (a *App) backupsListHandler(w http.ResponseWriter, r *http.Request) {
 			date = info.ModTime().UTC().Format(time.RFC3339)
 		}
 		kind := "routes"
-		if staticBase != "" && bakBaseName(n) == staticBase {
+		if base := bakBaseName(n); certNames[base] {
+			kind = "certs"
+		} else if staticBase != "" && base == staticBase {
 			kind = "static"
 		}
 		list = append(list, backup{Name: n, Size: size, Date: date, Kind: kind})
@@ -1095,12 +1102,20 @@ func (a *App) restoreHandler(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "cannot read backup: "+err.Error(), http.StatusNotFound)
 		return
 	}
-	origName := strings.TrimSuffix(filename, ".bak")
-	if idx := strings.LastIndex(origName, "."); idx >= 0 {
-		candidate := origName[:idx]
-		if len(origName)-idx == 16 {
-			origName = candidate
+	origName := bakBaseName(filename)
+	sameName := 0
+	for path, key := range acmeBackupKeys(acmeJSONPaths(a.cfg.ACMEJSONPath)) {
+		if key == origName {
+			a.restoreCertStore(w, r, path, data)
+			return
 		}
+		if filepath.Base(path) == origName {
+			sameName++
+		}
+	}
+	if sameName > 1 {
+		jsonError(w, origName+" matches more than one certificate store, so this backup cannot be restored safely", http.StatusConflict)
+		return
 	}
 	var dest string
 	if a.cfg.StaticConfigPath != "" && origName == filepath.Base(a.cfg.StaticConfigPath) {
@@ -1108,7 +1123,12 @@ func (a *App) restoreHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		cfgPath := a.cfg.ConfigPath
 		info, _ := os.Stat(cfgPath)
-		if info != nil && info.IsDir() {
+		isDir := info != nil && info.IsDir()
+		if !dynamicConfigName(origName) && (isDir || origName != filepath.Base(cfgPath)) {
+			jsonError(w, "no config file matches "+origName, http.StatusBadRequest)
+			return
+		}
+		if isDir {
 			dest = filepath.Join(cfgPath, origName)
 		} else {
 			dest = cfgPath
@@ -1124,6 +1144,44 @@ func (a *App) restoreHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{"ok": true})
+}
+
+func (a *App) restoreCertStore(w http.ResponseWriter, r *http.Request, path string, data []byte) {
+	restart := a.cfg.RestartMethod == "proxy" || a.cfg.RestartMethod == "socket" || a.cfg.RestartMethod == "poison-pill"
+	if !restart {
+		jsonError(w, "no RESTART_METHOD is configured on this agent, and Traefik only reads acme.json at startup", http.StatusForbidden)
+		return
+	}
+	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && !json.Valid(trimmed) {
+		jsonError(w, "this backup is not valid JSON, nothing was restored", http.StatusBadRequest)
+		return
+	}
+	acmeMu.Lock()
+	defer acmeMu.Unlock()
+	if !acmeWritable(path) {
+		jsonError(w, filepath.Base(path)+" is mounted read only on this agent, nothing was restored", http.StatusForbidden)
+		return
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		jsonError(w, "could not read "+filepath.Base(path)+": "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, err := acmeBackupBytes(path, current, a); err != nil {
+		a.failuref("backup", "pre-restore backup of %s failed: %v", path, err)
+		jsonError(w, "backup failed, nothing was restored: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := acmeWriteInPlace(path, data, current); err != nil {
+		status := http.StatusInternalServerError
+		if _, changed := err.(acmeChangedError); changed {
+			status = http.StatusConflict
+		}
+		jsonError(w, "restore failed: "+err.Error(), status)
+		return
+	}
+	restarted := a.restartAfterCertChange(r)
+	jsonOK(w, map[string]any{"ok": true, "restarted": restarted})
 }
 
 func (a *App) backupDeleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -1259,29 +1317,6 @@ func (a *App) gitPush(action string, customMsg string) error {
 	dynDir := filepath.Join(repoDir, "dynamic")
 	staticDir := filepath.Join(repoDir, "static")
 
-	copyToDir := func(src, destDir string) {
-		info, err := os.Stat(src)
-		if err != nil {
-			return
-		}
-		if info.IsDir() {
-			entries, _ := os.ReadDir(src)
-			for _, e := range entries {
-				if !e.IsDir() {
-					data, err := os.ReadFile(filepath.Join(src, e.Name()))
-					if err == nil {
-						os.WriteFile(filepath.Join(destDir, e.Name()), data, 0o644)
-					}
-				}
-			}
-		} else {
-			data, err := os.ReadFile(src)
-			if err == nil {
-				os.WriteFile(filepath.Join(destDir, filepath.Base(src)), data, 0o644)
-			}
-		}
-	}
-
 	ts := time.Now().Format("2006-01-02 15:04:05")
 	msg := strings.NewReplacer("{action}", action, "{timestamp}", ts).Replace(a.cfg.GitBackupCommitMsg)
 	if strings.TrimSpace(customMsg) != "" {
@@ -1295,12 +1330,7 @@ func (a *App) gitPush(action string, customMsg string) error {
 		if frc == 0 {
 			a.gitRun([]string{"reset", "--hard", "FETCH_HEAD"}, repoDir)
 		}
-		os.MkdirAll(dynDir, 0o755)
-		os.MkdirAll(staticDir, 0o755)
-		copyToDir(a.cfg.ConfigPath, dynDir)
-		if a.cfg.StaticConfigPath != "" {
-			copyToDir(a.cfg.StaticConfigPath, staticDir)
-		}
+		a.gitStage(dynDir, staticDir)
 		a.gitRun([]string{"add", "-A"}, repoDir)
 		_, _, rc := a.gitRun([]string{"diff", "--cached", "--quiet"}, repoDir)
 		if rc == 0 {
@@ -1322,6 +1352,40 @@ func (a *App) gitPush(action string, customMsg string) error {
 		errOut = strings.ReplaceAll(errOut, token, "***")
 	}
 	return fmt.Errorf("push failed: %s", errOut)
+}
+
+func (a *App) gitStage(dynDir, staticDir string) {
+	os.MkdirAll(dynDir, 0o755)
+	os.MkdirAll(staticDir, 0o755)
+	stores := map[string]bool{}
+	for _, p := range acmeJSONPaths(a.cfg.ACMEJSONPath) {
+		stores[filepath.Base(p)] = true
+	}
+	copyFile := func(src, destDir string) {
+		if data, err := os.ReadFile(src); err == nil {
+			os.WriteFile(filepath.Join(destDir, filepath.Base(src)), data, 0o644)
+		}
+	}
+	if info, err := os.Stat(a.cfg.ConfigPath); err == nil {
+		if info.IsDir() {
+			entries, _ := os.ReadDir(a.cfg.ConfigPath)
+			for _, e := range entries {
+				if !e.IsDir() && dynamicConfigName(e.Name()) && !stores[e.Name()] {
+					copyFile(filepath.Join(a.cfg.ConfigPath, e.Name()), dynDir)
+				}
+			}
+		} else if !stores[filepath.Base(a.cfg.ConfigPath)] {
+			copyFile(a.cfg.ConfigPath, dynDir)
+		}
+	}
+	if a.cfg.StaticConfigPath != "" {
+		copyFile(a.cfg.StaticConfigPath, staticDir)
+	}
+}
+
+func dynamicConfigName(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".toml")
 }
 
 var shaRe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
@@ -2689,7 +2753,10 @@ func acmeBackupBytes(path string, raw []byte, a *App) (string, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
 	}
-	base := filepath.Base(path)
+	base := acmeBackupKeys(acmeJSONPaths(a.cfg.ACMEJSONPath))[path]
+	if base == "" {
+		base = filepath.Base(path)
+	}
 	for attempt := 0; attempt < acmeAttempts+2; attempt++ {
 		dest := filepath.Join(dir, base+"."+time.Now().UTC().Format("20060102_150405")+".bak")
 		fh, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -2767,6 +2834,53 @@ func acmeWriteAll(path string, padded []byte, size int64) error {
 		return err
 	}
 	return fh.Sync()
+}
+
+func acmeKeyPart(parent string) string {
+	if parent == "" || parent == "." || parent == "/" {
+		return "store"
+	}
+	return strings.Map(func(r rune) rune {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == ' ' || r == '-' {
+			return r
+		}
+		return '-'
+	}, parent)
+}
+
+func acmeQualifiedKey(path, base string) string {
+	return acmeKeyPart(filepath.Base(filepath.Dir(path))) + "-" + base
+}
+
+func acmeBackupKey(path string, all []string) string {
+	base := filepath.Base(path)
+	var same []string
+	seen := map[string]bool{}
+	for _, other := range all {
+		if !seen[other] && filepath.Base(other) == base {
+			same = append(same, other)
+		}
+		seen[other] = true
+	}
+	if len(same) <= 1 {
+		return base
+	}
+	key := acmeQualifiedKey(path, base)
+	for _, other := range same {
+		if other != path && acmeQualifiedKey(other, base) == key {
+			sum := sha256.Sum256([]byte(path))
+			return hex.EncodeToString(sum[:])[:8] + "-" + base
+		}
+	}
+	return key
+}
+
+func acmeBackupKeys(paths []string) map[string]string {
+	keys := map[string]string{}
+	for _, path := range paths {
+		keys[path] = acmeBackupKey(path, paths)
+	}
+	return keys
 }
 
 func (a *App) restartAfterCertChange(r *http.Request) bool {

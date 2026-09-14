@@ -3821,7 +3821,10 @@ def list_backups():
     ensure_backup_dir()
     static_path = _get_static_config_path()
     static_base = os.path.basename(static_path) if static_path else None
-    acme_bases  = {os.path.basename(p) for p in _settings.get_acme_json_paths()}
+    acme_paths  = _host_cert_manage_state()['paths']
+    acme_bases  = (set(_acme.backup_keys(acme_paths).values())
+                   | {os.path.basename(p) for p in acme_paths}
+                   | {os.path.basename(p) for p in _settings.get_acme_json_paths()})
     _name_re    = re.compile(r'^(.+)\.(\d{8}_\d{6})\.bak$')
     backups = []
     for f in os.listdir(BACKUP_DIR):
@@ -4491,23 +4494,24 @@ def api_restore(filename):
         path = _validated_backup_path(filename)
         if not os.path.exists(path):
             return jsonify({'error': 'Backup not found'}), 404
-        bname = filename
-        target_path = None
-        for p in env.CONFIG_PATHS:
-            if bname.startswith(os.path.basename(p) + '.'):
-                target_path = p
-                break
+        stamped = re.match(r'^(.+)\.\d{8}_\d{6}\.bak$', filename)
+        orig = stamped.group(1) if stamped else ''
+        target_path = next((p for p in env.CONFIG_PATHS if os.path.basename(p) == orig), None)
         if target_path is None:
             static_path = _get_static_config_path()
-            if static_path and bname.startswith(os.path.basename(static_path) + '.'):
+            if static_path and os.path.basename(static_path) == orig:
                 target_path = static_path
         acme_target = None
-        if target_path is None:
-            for p in _settings.get_acme_json_paths():
-                resolved = _readable_config_path(p)
-                if resolved and bname.startswith(os.path.basename(resolved) + '.'):
-                    acme_target = resolved
+        acme_key = None
+        if target_path is None and orig:
+            store_paths = _host_cert_manage_state()['paths']
+            for store_path, key in _acme.backup_keys(store_paths).items():
+                if key == orig:
+                    acme_target, acme_key = store_path, key
                     break
+            if acme_target is None and sum(1 for p in store_paths if os.path.basename(p) == orig) > 1:
+                return jsonify({'error': f'{orig} matches more than one certificate store, '
+                                         'so this backup cannot be restored safely'}), 409
         if acme_target:
             state = _host_cert_manage_state()
             if not state['available']:
@@ -4516,7 +4520,7 @@ def api_restore(filename):
                 body = fh.read()
             with _acme.store_lock():
                 current = _acme.snapshot(acme_target)
-                _acme.backup(acme_target, current)
+                _acme.backup(acme_target, current, acme_key)
                 _acme.write_bytes_in_place(acme_target, body, restore=current)
             ok, err = trigger_traefik_restart()
             logger.info(f"Restored: {filename} -> {acme_target}")

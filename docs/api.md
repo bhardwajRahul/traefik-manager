@@ -442,7 +442,7 @@ When nothing could be read, the response also carries an `error` string.
 
 ### Restoring a certificate store
 
-`POST /api/restore/<filename>` also accepts an `acme.json` backup, which `GET /api/backups` reports with `kind: certs`. It writes the file back in place, keeps mode `600` and restarts Traefik, and answers `403` when the mount is read only or no restart method is set.
+`POST /api/restore/<filename>` also accepts an `acme.json` backup, which `GET /api/backups` reports with `kind: certs`. It writes the file back in place, keeps mode `600` and restarts Traefik, and answers `403` when the mount is read only or no restart method is set. When two stores share a file name, their backups carry the store's folder, for example `a-acme.json.20260914_101010.bak`, and restore into that store. An older backup that matches more than one store answers `409`.
 
 ### `GET /api/certs/manage`
 

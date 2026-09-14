@@ -52,7 +52,7 @@ TM handles authentication automatically when proxying calls through `/api/agents
 | DELETE | `/api/crowdsec/decisions/<id>` | Unban an IP |
 | GET | `/api/backups` | List local `.bak` backup files |
 | POST | `/api/backup/create` | Create `.bak` backups for all config files (one per file) |
-| POST | `/api/restore/<filename>` | Restore a config file from a `.bak` backup |
+| POST | `/api/restore/<filename>` | Restore a config file or certificate store from a `.bak` backup |
 | POST | `/api/backup/delete/<filename>` | Delete a `.bak` backup file |
 | GET | `/api/backup/git/status` | Git backup status |
 | POST | `/api/backup/git/push` | Manual git push |
@@ -116,6 +116,8 @@ All errors return `{"error": "message", "ok": false}`.
 ## Backup format
 
 Local backups are per-file `.bak` files, not zip archives, named `filename.YYYYMMDD_HHMMSS.bak` (e.g. `dynamic.yml.20250601_143022.bak`) with a UTC timestamp. When restoring, the agent strips the timestamp suffix to recover the original filename and writes it back to `CONFIG_PATH` - or to `STATIC_CONFIG_PATH` when the recovered name is that of the static config file. A `.bak` of the destination is taken before the restore overwrites it.
+
+A certificate store backup goes back into its `acme.json` in place at mode `600`. It needs a writable mount and `RESTART_METHOD`, and restarts Traefik. When two stores share a file name, their backups carry the store's folder, for example `a-acme.json.20250601_143022.bak`. Any other name must match a dynamic config file, or the restore answers `400`.
 
 `POST /api/backup/create` creates one `.bak` per config file found in `CONFIG_PATH` (and `STATIC_CONFIG_PATH` if configured) in a single request. `POST /api/configs` also creates a `.bak` for the affected file before writing.
 

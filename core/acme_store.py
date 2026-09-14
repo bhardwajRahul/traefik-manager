@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os
+import re
 import stat
 import time
 
@@ -37,6 +39,34 @@ def _cert_key(resolver_data):
         if isinstance(resolver_data.get(key), list):
             return key
     return ''
+
+
+def _key_part(parent):
+    if parent in ('', '.', '/'):
+        return 'store'
+    return re.sub(r'[^A-Za-z0-9._ -]', '-', parent)
+
+
+def _qualified_key(path, base):
+    return f'{_key_part(os.path.basename(os.path.dirname(path)))}-{base}'
+
+
+def backup_key(path, all_paths):
+    base = os.path.basename(path)
+    same = []
+    for other in all_paths or []:
+        if os.path.basename(other) == base and other not in same:
+            same.append(other)
+    if len(same) <= 1:
+        return base
+    key = _qualified_key(path, base)
+    if any(other != path and _qualified_key(other, base) == key for other in same):
+        return f'{hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]}-{base}'
+    return key
+
+
+def backup_keys(paths):
+    return {path: backup_key(path, paths) for path in paths or []}
 
 
 def store_lock():
@@ -103,11 +133,11 @@ def _write_all(fd, body):
         view = view[written:]
 
 
-def backup(path, raw=None):
+def backup(path, raw=None, key=None):
     os.makedirs(env.BACKUP_DIR, exist_ok=True)
     if raw is None:
         raw = snapshot(path)
-    base = os.path.basename(path)
+    base = key or os.path.basename(path)
     for _attempt in range(ATTEMPTS + 2):
         dest = os.path.join(env.BACKUP_DIR, f'{base}.{_stamp()}.bak')
         try:
@@ -191,9 +221,9 @@ def _verify(path, body, restore):
     raise AcmeStoreError(f'{name} did not read back as valid JSON after writing, the previous copy was put back')
 
 
-def remove(path, wanted):
+def remove(path, wanted, key=None):
     with store_lock():
-        return _apply(path, wanted)
+        return _apply(path, wanted, key=key)
 
 
 def plan(path, wanted, raw):
@@ -221,17 +251,17 @@ def plan(path, wanted, raw):
     return removed, json.dumps(data, indent=2).encode('utf-8')
 
 
-def commit(path, raw, body):
+def commit(path, raw, body, key=None):
     if snapshot(path) != raw:
         raise AcmeStoreChanged(
             f'{os.path.basename(path)} changed while it was being edited, most likely Traefik renewing a '
             'certificate. Nothing was written, try again.')
-    saved = backup(path, raw)
+    saved = backup(path, raw, key)
     write_bytes_in_place(path, body, restore=raw)
     return saved
 
 
-def _apply(path, wanted, raw=None):
+def _apply(path, wanted, raw=None, key=None):
     for attempt in range(ATTEMPTS):
         if raw is None:
             raw = snapshot(path)
@@ -239,7 +269,7 @@ def _apply(path, wanted, raw=None):
         if not removed:
             return 0, None
         try:
-            return removed, commit(path, raw, body)
+            return removed, commit(path, raw, body, key)
         except AcmeStoreChanged:
             if attempt == ATTEMPTS - 1:
                 raise
@@ -258,10 +288,11 @@ def remove_many(paths, wanted):
             removed, _body = plan(path, wanted, raw)
             if removed:
                 planned.append((path, raw))
+        keys = backup_keys(paths)
         total, saved = 0, None
         for path, raw in planned:
             try:
-                count, backup_path = _apply(path, wanted, raw)
+                count, backup_path = _apply(path, wanted, raw, keys.get(path))
             except (AcmeStoreError, OSError) as e:
                 if total:
                     raise AcmeStorePartial(

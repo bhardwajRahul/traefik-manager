@@ -454,10 +454,10 @@ def test_a_failure_after_the_first_store_is_reported_as_partial(store, tmp_path,
     other.chmod(0o600)
     real_commit = acme_store.commit
 
-    def failing(path, raw, body):
+    def failing(path, raw, body, key=None):
         if path == str(other):
             raise OSError('disk full')
-        return real_commit(path, raw, body)
+        return real_commit(path, raw, body, key)
 
     monkeypatch.setattr(acme_store, 'commit', failing)
     with pytest.raises(acme_store.AcmeStorePartial) as err:
@@ -518,3 +518,103 @@ def test_a_partial_removal_keeps_the_restart_screen_up():
     body = js[js.index('async function _sendCertRemoval('):js.index('async function _loadCertUsage(')]
     assert 'body.partial && body.restarted' in body, \
         'Traefik restarts after a partial removal, so the page is about to go away'
+
+
+KEY_VECTORS = [
+    (['/a/acme.json'], ['acme.json']),
+    (['/le/a/acme.json', '/le/b/acme.json'], ['a-acme.json', 'b-acme.json']),
+    (['/srv/ovh.json', '/srv/lan.json'], ['ovh.json', 'lan.json']),
+    (['/one/le@prod/acme.json', '/two/acme.json'], ['le-prod-acme.json', 'two-acme.json']),
+    (['acme.json', '/x/acme.json'], ['store-acme.json', 'x-acme.json']),
+]
+
+
+def test_backup_keys_follow_the_same_rules_as_the_agent():
+    import hashlib
+    for paths, keys in KEY_VECTORS:
+        assert [acme_store.backup_key(p, paths) for p in paths] == keys, paths
+    paths = ['/x/certs/acme.json', '/y/certs/acme.json']
+    assert [acme_store.backup_key(p, paths) for p in paths] == \
+        [hashlib.sha256(p.encode()).hexdigest()[:8] + '-acme.json' for p in paths]
+    agent = _read('agent', 'certs_restore_test.go')
+    for paths, keys in KEY_VECTORS:
+        for key in keys:
+            assert '"%s"' % key in agent, 'the agent test table must carry the same vectors: ' + key
+
+
+def _pair_of_stores(tmp_path):
+    first = tmp_path / 'a' / 'acme.json'
+    second = tmp_path / 'b' / 'acme.json'
+    for p in (first, second):
+        p.parent.mkdir()
+        p.write_text(json.dumps(STORE))
+        p.chmod(0o600)
+    return first, second
+
+
+def test_two_stores_with_the_same_name_back_up_to_different_files(tmp_path, monkeypatch):
+    from core import env as env_mod
+    monkeypatch.setattr(env_mod, 'BACKUP_DIR', str(tmp_path / 'backups'))
+    first, second = _pair_of_stores(tmp_path)
+    removed, _ = acme_store.remove_many([str(first), str(second)], [('letsencrypt', 'drop.example.com')])
+    assert removed == 2
+    names = sorted(f for f in os.listdir(tmp_path / 'backups') if f.endswith('.bak'))
+    assert [n.rsplit('.', 2)[0] for n in names] == ['a-acme.json', 'b-acme.json'], \
+        'both backups were named acme.json, so there was no way to tell which store each came from'
+
+
+def _restore_setup(client, tmp_path, monkeypatch):
+    import app as app_mod
+    first, second = _pair_of_stores(tmp_path)
+    stores = [str(first), str(second)]
+    monkeypatch.setattr(app_mod, '_host_cert_manage_state', lambda: {
+        'available': True, 'writable': True, 'restart_method': 'poison-pill', 'reason': '', 'paths': stores})
+    restarts = []
+    monkeypatch.setattr(app_mod, 'trigger_traefik_restart', lambda: restarts.append(1) or (True, ''))
+    return app_mod, first, second, restarts
+
+
+def _drop_backups(pattern):
+    from core import env as env_mod
+    for f in os.listdir(env_mod.BACKUP_DIR):
+        if pattern in f:
+            os.remove(os.path.join(env_mod.BACKUP_DIR, f))
+
+
+def test_a_certificate_backup_restores_into_the_store_it_came_from(client, tmp_path, monkeypatch):
+    from core import env as env_mod
+    app_mod, first, second, restarts = _restore_setup(client, tmp_path, monkeypatch)
+    saved = {'letsencrypt': {'Certificates': [{'domain': {'main': 'restored.example.com'}}]}}
+    name = 'b-acme.json.20260914_101010.bak'
+    os.makedirs(env_mod.BACKUP_DIR, exist_ok=True)
+    with open(os.path.join(env_mod.BACKUP_DIR, name), 'w') as fh:
+        json.dump(saved, fh)
+    try:
+        kinds = {b['name']: b['kind'] for b in app_mod.list_backups()}
+        assert kinds.get(name) == 'certs', 'a folder-qualified backup must still be listed as a certificate backup'
+        before_first = first.read_bytes()
+        inode = os.stat(second).st_ino
+        res = client.post('/api/restore/' + name, headers=HDR)
+        assert res.status_code == 200, res.get_json()
+        assert first.read_bytes() == before_first, 'the other store with the same file name was overwritten'
+        assert json.loads(second.read_text()) == saved
+        assert os.stat(second).st_ino == inode and stat.S_IMODE(os.stat(second).st_mode) == 0o600
+        assert restarts
+    finally:
+        _drop_backups('acme.json.')
+
+
+def test_an_ambiguous_certificate_backup_is_refused(client, tmp_path, monkeypatch):
+    from core import env as env_mod
+    _app_mod, first, second, restarts = _restore_setup(client, tmp_path, monkeypatch)
+    name = 'acme.json.20260914_101010.bak'
+    os.makedirs(env_mod.BACKUP_DIR, exist_ok=True)
+    with open(os.path.join(env_mod.BACKUP_DIR, name), 'w') as fh:
+        json.dump({'letsencrypt': {}}, fh)
+    try:
+        before = (first.read_bytes(), second.read_bytes())
+        res = client.post('/api/restore/' + name, headers=HDR)
+        assert res.status_code == 409, res.get_json()
+        assert (first.read_bytes(), second.read_bytes()) == before and not restarts
+    finally:
+        _drop_backups('acme.json.')
