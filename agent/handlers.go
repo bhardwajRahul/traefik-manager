@@ -265,6 +265,8 @@ func (a *App) configsWriteHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		targetPath = cfgPath
 	}
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	if err := a.createFileBak(targetPath, filepath.Base(targetPath)); err != nil {
 		a.failuref("backup", "pre-write backup of %s failed: %v", targetPath, err)
 		jsonError(w, "backup failed, nothing was written: "+err.Error(), http.StatusInternalServerError)
@@ -285,9 +287,21 @@ func (a *App) configsWriteHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func atomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
+	}
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp, 0o644)
+	}
+	if werr != nil {
+		os.Remove(tmp)
+		return werr
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
@@ -1153,6 +1167,8 @@ func (a *App) restoreHandler(w http.ResponseWriter, r *http.Request) {
 			dest = cfgPath
 		}
 	}
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	if err := a.createFileBak(dest, origName); err != nil {
 		a.failuref("backup", "pre-restore backup of %s failed: %v", dest, err)
 		jsonError(w, "backup failed, nothing was restored: "+err.Error(), http.StatusInternalServerError)
@@ -1593,6 +1609,8 @@ func (a *App) gitRestoreHandler(w http.ResponseWriter, r *http.Request, sha stri
 		jsonError(w, "invalid sha", http.StatusBadRequest)
 		return
 	}
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	repoDir := a.gitRepoDir()
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
 		jsonError(w, "git repo not initialized", http.StatusBadRequest)
@@ -1876,6 +1894,9 @@ func (a *App) routeRawSaveHandler(w http.ResponseWriter, r *http.Request, routeI
 		jsonError(w, "invalid YAML: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 
 	var targetPath string
 	if cf != "" {

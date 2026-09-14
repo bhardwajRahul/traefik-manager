@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -59,6 +60,7 @@ type App struct {
 	csClient   *http.Client
 	keys       *keyStore
 	events     *eventLog
+	cfgMu      sync.Mutex
 }
 
 func buildCSClient(cfg *Config) *http.Client {
