@@ -10,6 +10,13 @@ from core.env import logger
 CATEGORY         = 'traefik'
 TICK             = 60
 DEFAULT_INTERVAL = 300
+ROUTE_EVENT_MAX = 5
+SUMMARY_NAMES = 3
+_SUMMARY = {
+    'error':   '{count} routes are unreachable: {names}',
+    'warning': '{count} route backends are degraded: {names}',
+    'success': '{count} routes are reachable again: {names}',
+}
 INTERVALS        = (60, 300, 900, 1800)
 FAILS_TO_DOWN    = 2
 WORKERS          = 6
@@ -217,12 +224,15 @@ def check(sources, now=None, probe=None, settings=None, overrides_for=None) -> l
         except Exception:
             logger.exception(f"Route check failed for {name or 'the host'}")
             continue
+        events = []
         for (app, _url), obs in zip(jobs, results):
             key = monitor_mod._server_key(server, str(app['id']))
-            entry, event = settle(state.get(key), obs, str(app.get('name') or app['id']), now)
+            route = str(app.get('name') or app['id'])
+            entry, event = settle(state.get(key), obs, route, now)
             seen[key] = entry
             if event:
-                raised.append((event[0], monitor_mod._server_msg(name, event[1]), CATEGORY))
+                events.append((event[0], route, event[1]))
+        raised.extend(_grouped(name, events, len(jobs)))
     for key, entry in state.items():
         if monitor_mod._key_server(key) not in checked:
             seen.setdefault(key, entry)
@@ -231,6 +241,30 @@ def check(sources, now=None, probe=None, settings=None, overrides_for=None) -> l
     monitor_mod._prune(state, monitor_mod._known_servers(servers))
     meta['checked_at'] = int(now)
     return raised
+
+
+def _grouped(name, events, checked) -> list:
+    counts = {}
+    for kind, _route, _msg in events:
+        counts[kind] = counts.get(kind, 0) + 1
+    out  = []
+    done = set()
+    for kind, _route, msg in events:
+        if kind not in _SUMMARY or counts[kind] <= ROUTE_EVENT_MAX:
+            out.append((kind, monitor_mod._server_msg(name, msg), CATEGORY))
+            continue
+        if kind in done:
+            continue
+        done.add(kind)
+        routes = sorted(r for k, r, _m in events if k == kind)
+        shown  = ', '.join(routes[:SUMMARY_NAMES])
+        if len(routes) > SUMMARY_NAMES:
+            shown += f' and {len(routes) - SUMMARY_NAMES} more'
+        text = _SUMMARY[kind].format(count=len(routes), names=shown)
+        if kind == 'error' and len(routes) == checked:
+            text += ', check that Traefik Manager can reach them'
+        out.append((kind, monitor_mod._server_msg(name, text), CATEGORY))
+    return out
 
 
 def _public(entry: dict) -> dict:
