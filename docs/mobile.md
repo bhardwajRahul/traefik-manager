@@ -99,12 +99,15 @@ The overview: router, service and middleware counts with their health, the provi
 
 - Every HTTP, TCP and UDP route, with status, domain, target and attached middlewares
 - Search, and filter by protocol or status
-- Ping a route to check the backend is answering
+- Ping a route to check the backend is answering; a route with some backend servers down reads as degraded
 - Tap a route for its detail pane; edit it, delete it, enable or disable it, or edit its raw YAML
+- When its service has a health check, the detail pane marks each backend server up or down and counts them
 - Disabling preserves the configuration - Traefik simply stops routing until you re-enable
 - Add a route with the form, or drop to raw YAML for anything the form does not cover
 - Multiple backends, sticky sessions, health checks and router priority
-- Per-route certificate resolver, wildcard domains, and **Skip TLS verification** for self-signed backends
+- Per-route certificate resolver, editable certificate and extra domains, and **Skip TLS verification** for self-signed backends
+- Backend scheme `http`, `https` or `h2c`
+- **Use a service** lists this config's services, services from other providers such as `whoami@docker`, and `noop@internal` for a router with no backend
 - Composite services (`weighted`, `mirroring`, `failover`) are shown but edited on the web - the app keeps their configuration intact when saving a route
 
 ### Middleware
@@ -119,7 +122,7 @@ The overview: router, service and middleware counts with their health, the provi
 
 Every service Traefik knows about, with its backends, health and the routers using it. Search and filter by provider. Tap for the detail pane.
 
-From 1.13.0 the tab also authors them. **+** builds a load balancer, weighted, mirroring or failover service; each backend row takes an address or a reference to another service, with per-row weights and mirror percentages. The detail pane edits, renames and deletes, and offers to manage a composite Traefik Manager did not write, or to hand it back.
+From 1.13.0 the tab also authors them. **+** builds a load balancer, weighted, mirroring or failover service; each backend row takes an address or a reference to another service, with per-row weights and mirror percentages. The detail pane edits, renames and deletes, and offers to manage a composite Traefik Manager did not write, or to hand it back. A load balancer can carry a health check with the same fields as the web app: path, interval, timeout, method, expected status, interval when down, scheme, port, host header, mode, redirects and headers.
 
 | | |
 |---|---|
@@ -140,7 +143,9 @@ Domains need a JSON access log; on `common` format the card says so.
 
 Built around the attack rather than the ban list, as the web app is. Cards for **attacking sources**, **networks**, **scenarios**, **targeted paths** (or accounts on an SSH host), **tooling** by user agent, and **bans in force**. Colour marks only what is not already handled, so a host being probed but absorbed cleanly reads calm.
 
-- Search by address, scenario, network or path
+- Search by address, scenario, network, path, route or host
+- **Targeted routes** names the routers and hosts attackers went through, when CrowdSec's context file lists `traefik_router_name` and `target_fqdn`
+- **Bans in force** pages through decisions on the server, 50 at a time, so a large blocklist is never downloaded whole
 - **Add decision** to ban an address, with type, duration and reason
 - Remove a decision to unban
 - Country flags and a ranked country strip when GeoIP is enabled; tap a country to filter
@@ -150,6 +155,10 @@ The screen states plainly when the LAPI is unreachable, or when only decisions o
 ### Certificates
 
 Every certificate from your resolvers, with domains and expiry. Search, copy the domain list, and pull to refresh.
+
+- Filter by **Unused**, **No resolver** or **Expiring**
+- Remove a certificate, or every unused one at once, when `acme.json` is writable and a restart method is set. A copy of `acme.json` is saved to Backups and Traefik restarts
+- Deleting a route offers to remove the certificates nothing else uses
 
 ### Plugins
 
@@ -161,11 +170,12 @@ Nothing reaches Traefik until it restarts, so the tab says so and offers **Resta
 
 ### Backups
 
-Three tabs: **Dynamic**, **Static** and **Git**.
+Four tabs: **Dynamic**, **Static**, **Certificates** and **Git**.
 
 - Create a backup on demand, restore one, or delete it
 - Restoring asks for confirmation first, and the server takes a backup of the current config before overwriting
 - After restoring a static backup the screen tells you Traefik is still running the old config, and offers **Restart Traefik**
+- **Certificates** lists the `acme.json` copies taken before a certificate is removed. Restoring one replaces every certificate and restarts Traefik; if the restart fails the screen offers **Restart Traefik**
 - The Git tab shows commit history with the changed files, pushes on demand, and restores from a commit
 
 ### Notifications
@@ -236,9 +246,9 @@ Both resize freely and re-flow to fit.
 
 | Page | What is on it |
 |---|---|
-| Traefik connection | How this device reaches the server, plus domains, certificate resolvers and the direct Traefik API URL, with a **Test connection** button |
+| Traefik connection | How this device reaches the server, plus domains, certificate resolvers and the direct Traefik API URL, with a **Test connection** button. Changing the API URL asks for the saved password again |
 | Servers | The server list, and the compose snippet for a new agent (see [Servers and agents](#servers-and-agents)) |
-| Authentication | Login status, and the API keys registered on the server |
+| Authentication | Login status, the API keys registered on the server, and **Sign out other sessions** for browsers |
 | Notifications | Push to this device, the notification channels, and the history (see [Notifications](#notifications)) |
 | Appearance and security | See below |
 | Static config | The raw `traefik.yml`, and the restart that applies it (see [Static config](#static-config)) |
