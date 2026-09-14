@@ -4177,6 +4177,17 @@ def api_git_backup_diff(sha):
         return jsonify({'error': str(e)}), 500
 
 
+def _write_restored(path, content):
+    tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        with open(tmp, 'w') as f:
+            f.write(content)
+        _cfg._replace_or_copy(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 @app.route('/api/backup/git/restore/<sha>', methods=['POST'])
 @csrf_protect
 @login_required
@@ -4213,18 +4224,21 @@ def api_git_backup_restore(sha):
         sp = _get_static_config_path()
         if sp:
             create_backup(sp)
+        keys  = _back.config_keys()
+        bases = [os.path.basename(p) for p in env.CONFIG_PATHS]
         for p in env.CONFIG_PATHS:
-            base    = os.path.basename(p)
-            content = _git_show_first(repo_dir, sha, [f'dynamic/{base}', base])
+            base       = os.path.basename(p)
+            candidates = [f'dynamic/{keys[p]}']
+            if keys[p] == base and bases.count(base) == 1:
+                candidates.append(base)
+            content = _git_show_first(repo_dir, sha, candidates)
             if content:
-                with open(p, 'w') as f:
-                    f.write(content)
+                _write_restored(p, content)
         if sp:
             base    = os.path.basename(sp)
             content = _git_show_first(repo_dir, sha, [f'static/{base}', base])
             if content:
-                with open(sp, 'w') as f:
-                    f.write(content)
+                _write_restored(sp, content)
         add_notification('warning', f'Restored from git commit {sha[:8]}', category='backup')
         return jsonify({'ok': True})
     except Exception as e:
@@ -4681,7 +4695,13 @@ def api_restore(filename):
             return jsonify({'error': 'Backup not found'}), 404
         stamped = re.match(r'^(.+)\.\d{8}_\d{6}\.bak$', filename)
         orig = stamped.group(1) if stamped else ''
-        target_path = next((p for p in env.CONFIG_PATHS if os.path.basename(p) == orig), None)
+        keys    = _back.config_keys()
+        by_stem = [p for p in env.CONFIG_PATHS if _back.backup_stem(keys[p]) == orig]
+        by_base = [p for p in env.CONFIG_PATHS if os.path.basename(p) == orig]
+        if orig and not by_stem and len(by_base) > 1:
+            return jsonify({'error': f'{orig} matches more than one config file, '
+                                     'so this backup cannot be restored safely'}), 409
+        target_path = (by_stem or by_base or [None])[0]
         if target_path is None:
             static_path = _get_static_config_path()
             if static_path and os.path.basename(static_path) == orig:
@@ -4713,8 +4733,11 @@ def api_restore(filename):
             return jsonify({'success': True, 'restarted': ok, 'restart_error': '' if ok else err})
         if target_path is None:
             return jsonify({'error': f'No config file matches {filename!r}'}), 400
+        with open(path, 'rb') as fh:
+            restored = fh.read()
         create_backup(target_path)
-        shutil.copy2(path, target_path)
+        with open(target_path, 'wb') as fh:
+            fh.write(restored)
         logger.info(f"Restored: {filename} → {target_path}")
         add_notification('warning', f"Backup restored: {filename}", category='backup')
         return jsonify({'success': True})

@@ -838,6 +838,8 @@ List all backup files, newest first. `kind` is `static` for backups of `traefik.
 
 Create a manual backup of every loaded config file. Returns `{ "success": true, "names": ["dynamic.yml.20260324_220000.bak"], "count": 1 }`, or `400` when there is nothing to back up.
 
+Config files that share a name carry their folder in the backup name, for example `one__routes.yml.20260324_220000.bak`, and restore into that file. An older backup that matches more than one file answers `409`.
+
 ---
 
 ### `POST /api/restore/{filename}`

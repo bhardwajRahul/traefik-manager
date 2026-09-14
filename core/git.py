@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 
-from core import agents_http, env, notifications
+from core import agents_http, backups, env, notifications
 from core import settings as settings_mod
 from core.env import logger
 
@@ -149,12 +149,18 @@ def _git_push_configs(action='backup', custom_message=None):
                 _git_run(['reset', '--hard', 'FETCH_HEAD'])
             os.makedirs(dyn_dir,    exist_ok=True)
             os.makedirs(static_dir, exist_ok=True)
+            keys = backups.config_keys()
             for p in env.CONFIG_PATHS:
                 if env.is_own_state(p):
                     logger.warning(f"Not pushing {os.path.basename(p)}: it holds Traefik Manager's own settings, not Traefik config")
                     continue
+                dest = os.path.join(dyn_dir, *keys[p].split('/'))
+                if not os.path.realpath(dest).startswith(os.path.realpath(dyn_dir) + os.sep):
+                    logger.warning(f"Not pushing {p}: its backup name leaves the dynamic folder")
+                    continue
                 if os.path.exists(p):
-                    shutil.copy2(p, os.path.join(dyn_dir, os.path.basename(p)))
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    shutil.copy2(p, dest)
             sp = settings_mod._get_static_config_path()
             if sp and os.path.exists(sp):
                 shutil.copy2(sp, os.path.join(static_dir, os.path.basename(sp)))
