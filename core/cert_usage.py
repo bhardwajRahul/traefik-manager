@@ -131,7 +131,11 @@ def is_expired(cert, now=None) -> bool:
     return when < (now or datetime.now(timezone.utc))
 
 
-def analyze(certs, apps, configs=(), resolvers=None, routers_ok=True, configs_ok=True, now=None) -> dict:
+def analyze(certs, apps, configs=(), resolvers=None, routers_ok=True, configs_ok=True, now=None,
+            exclude_ids=()) -> dict:
+    excluded = {str(i) for i in exclude_ids or ()}
+    if excluded:
+        apps = [a for a in apps or [] if not (isinstance(a, dict) and str(a.get('id')) in excluded)]
     hosts, requested, opaque, catch = served_names(apps)
     requested |= generated_cert_names(configs)
 

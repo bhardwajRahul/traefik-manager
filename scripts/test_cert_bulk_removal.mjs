@@ -17,11 +17,15 @@ function harness(deleteBody, mode) {
     for (const id of ['certBulkBar', 'certBulkCount', 'certBulkBtn', 'certBulkWrap', 'certsContent',
                       'certDomainFilter', 'certf-all', 'certf-unused', 'certf-orphaned', 'certf-expiring'])
         { nodes[id] = el(id); nodes[id].classList.o = nodes[id]; }
-    const log = { toasts: [], posted: null, reloaded: false, overlay: 'none', shown: false, waited: null, refreshed: 0, rendered: 0 };
+    const log = { toasts: [], posted: null, reloaded: false, overlay: 'none', shown: false, waited: null, refreshed: 0, rendered: 0,
+                  urls: [], manage: { available: true }, usage: { certs: [], unused_known: true } };
     const ctx = {
         console,
         document: { getElementById: id => nodes[id] || null, querySelectorAll: () => [], body: { style: {} } },
         setTimeout, clearTimeout, Promise, JSON, Math, Set, Map, Array, Object, String, Number, Date, AbortSignal,
+        URLSearchParams,
+        setTabCount: () => {},
+        _emptyMountState: () => '',
         showToast: (m, k) => log.toasts.push([m, k || 'ok']),
         _csrfHeaders: () => ({}),
         _tlsSrv: () => '',
@@ -38,6 +42,9 @@ function harness(deleteBody, mode) {
             else log.reloaded = true;
         },
         fetch: async (url, opt) => {
+            log.urls.push(String(url));
+            if (String(url).startsWith('/api/certs/manage')) return { ok: true, json: async () => log.manage };
+            if (String(url).startsWith('/api/certs/usage')) return { ok: true, json: async () => log.usage };
             if (String(url).startsWith('/api/certs/delete')) {
                 log.posted = JSON.parse(opt.body);
                 if (mode === 'connection-lost') throw new TypeError('Failed to fetch');
@@ -60,6 +67,7 @@ function harness(deleteBody, mode) {
         ];
         var _confirmSeen = null;
         _confirmWith = async (o) => { _confirmSeen = o; return { ok: true }; };
+        var __realRefresh = refreshCertsTab;
         refreshCertsTab  = async () => { __log.refreshed++; };
         renderCertCards  = () => { __log.rendered++; };
     `, Object.assign(ctx, { __log: log }));
@@ -225,6 +233,97 @@ console.log('filtering a long list down');
         vm.runInContext("_allCerts = [{ resolver: 'le', main: 'a.one.dev', sans: [] }]; _paintCertDomainFilter();", ctx);
         return nodes.certDomainFilter.style.display === 'none';
     })());
+}
+
+console.log('certificate state follows the selected server');
+{
+    const { ctx, log } = harness({ ok: true, removed: 1, restarted: true });
+    vm.runInContext("_certsFor = ''; toggleCertBulkMode(); toggleCertPick(_certKey(_allCerts[0]));", ctx);
+    vm.runInContext("_activeAgent = { id: 'B', name: 'edge-b' }; _certServerChanged();", ctx);
+    check('a server switch drops the selection', vm.runInContext('_certPicked.size', ctx) === 0);
+    check('and leaves bulk mode', vm.runInContext('_certBulk', ctx) === false);
+    check('and forgets what the old server allowed', vm.runInContext('_certManage.available', ctx) === false);
+    await vm.runInContext('bulkRemoveCerts()', ctx);
+    check('nothing is sent after the switch', log.posted === null);
+}
+
+console.log('a stale list cannot remove from the new server');
+{
+    const { ctx, log } = harness({ ok: true, removed: 1, restarted: true });
+    vm.runInContext("_certsFor = ''; toggleCertBulkMode(); toggleCertPick(_certKey(_allCerts[0]));", ctx);
+    vm.runInContext("_activeAgent = { id: 'B', name: 'edge-b' };", ctx);
+    await vm.runInContext('bulkRemoveCerts()', ctx);
+    check('no confirm opens for rows loaded from another server', vm.runInContext('_confirmSeen', ctx) === null);
+    check('nothing is posted', log.posted === null);
+    check('the list is reloaded instead', log.refreshed === 1, log.refreshed);
+    check('the user is told why', log.toasts.some(t => /server changed/.test(t[0])), JSON.stringify(log.toasts));
+}
+
+console.log('a removal goes to the server its rows came from');
+{
+    const { ctx, log } = harness({ ok: true, removed: 1, restarted: true });
+    vm.runInContext("_activeAgent = { id: 'A', name: 'edge-a' }; _certsFor = 'A';", ctx);
+    await vm.runInContext('(async () => { toggleCertBulkMode(); toggleCertPick(_certKey(_allCerts[0])); await bulkRemoveCerts(); })()', ctx);
+    check('the request names the server the list was loaded for', log.posted && log.posted.server === 'A', JSON.stringify(log.posted));
+    check('the confirm says which agent it removes from', /on edge-a/.test(vm.runInContext('_confirmSeen.message', ctx)),
+          vm.runInContext('_confirmSeen.message', ctx));
+}
+
+console.log('a slow refresh for the old server does not overwrite the new one');
+{
+    const { ctx } = harness({ ok: true, removed: 1, restarted: true });
+    const gates = [];
+    ctx.agentFetch = () => new Promise(res => gates.push(res));
+    ctx.renderCertsVerdict = () => {};
+    vm.runInContext("_activeAgent = { id: 'A', name: 'a' };", ctx);
+    const first = vm.runInContext('__realRefresh()', ctx);
+    vm.runInContext("_activeAgent = { id: 'B', name: 'b' }; _certServerChanged();", ctx);
+    const second = vm.runInContext('__realRefresh()', ctx);
+    const reply = certs => ({ ok: true, json: async () => ({ certs }) });
+    gates[1](reply([{ resolver: 'le', main: 'b-only.example.com', sans: [], source: '/b.json' }]));
+    await second;
+    gates[0](reply([{ resolver: 'le', main: 'a-only.example.com', sans: [], source: '/a.json' }]));
+    await first;
+    const listed = vm.runInContext("_allCerts.map(c => c.main).join()", ctx);
+    check('the list belongs to the server now selected', listed === 'b-only.example.com', listed);
+    check('and is marked as loaded for it', vm.runInContext('_certsFor', ctx) === 'B');
+}
+
+console.log('a late permission answer for the old server is ignored');
+{
+    const { ctx } = harness({ ok: true, removed: 1, restarted: true });
+    let release = null;
+    ctx.fetch = () => new Promise(res => { release = () => res({ ok: true, json: async () => ({ available: true }) }); });
+    vm.runInContext("_activeAgent = { id: 'A', name: 'a' }; _certManage = { available: false };", ctx);
+    const pending = vm.runInContext('_loadCertManage()', ctx);
+    vm.runInContext("_activeAgent = { id: 'B', name: 'b' };", ctx);
+    release();
+    await pending;
+    check("the old server's answer does not unlock removal on the new one", vm.runInContext('_certManage.available', ctx) === false);
+}
+
+console.log('route delete only offers a certificate nothing else uses');
+{
+    const { ctx, log } = harness({ ok: true, removed: 1, restarted: true });
+    ctx._lastRenderedApps = [{ id: 'app@file', tls: true, rule: 'Host(`app.example.com`)' }];
+    ctx.agentFetch = async () => ({ ok: true, json: async () => ({ certs: [{ resolver: 'le', main: 'app.example.com', sans: [], source: '/acme.json' }] }) });
+    log.usage = { unused_known: true, certs: [{ resolver: 'le', main: 'app.example.com', source: '/acme.json', unused: false }] };
+    const inUse = await vm.runInContext("_certsForRoutes(['app@file'])", ctx);
+    check('a certificate another router still serves is not offered', inUse.length === 0, JSON.stringify(inUse));
+    check('the usage question leaves the deleted route out',
+          log.urls.some(u => u.startsWith('/api/certs/usage?') && u.includes('exclude=app%40file')), JSON.stringify(log.urls));
+    log.usage = { unused_known: true, certs: [{ resolver: 'le', main: 'app.example.com', source: '/acme.json', unused: true }] };
+    const free = await vm.runInContext("_certsForRoutes(['app@file'])", ctx);
+    check('a certificate nothing else uses is offered', free.length === 1 && free[0].main === 'app.example.com', JSON.stringify(free));
+    check('the offer remembers which server it was made for', free.length === 1 && free[0].server === '');
+    log.usage = { unused_known: false, certs: [{ resolver: 'le', main: 'app.example.com', source: '/acme.json', unused: true }] };
+    const unknown = await vm.runInContext("_certsForRoutes(['app@file'])", ctx);
+    check('nothing is offered when the server cannot tell', unknown.length === 0);
+    log.manage = { available: false };
+    log.usage = { unused_known: true, certs: [{ resolver: 'le', main: 'app.example.com', source: '/acme.json', unused: true }] };
+    const readOnly = await vm.runInContext("_certsForRoutes(['app@file'])", ctx);
+    check('nothing is offered on a read-only mount', readOnly.length === 0);
+    check('nothing was ever removed', log.posted === null);
 }
 
 console.log(fails ? `\n${fails} failed` : '\nall passed');

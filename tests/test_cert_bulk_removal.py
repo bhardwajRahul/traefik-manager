@@ -69,7 +69,7 @@ def test_the_delete_dialog_opens_without_waiting_for_the_certificate_lookup():
     assert js.count('checkboxAsync:') == 2, 'both delete paths offer the certificate the same way'
     certs = _read('static', 'js', 'certs.js')
     body = certs[certs.index('async function _certsForRoutes('):certs.index('async function removeCerts(')]
-    assert body.index('_loadCertManage()') < body.index('_loadCertUsage()'), \
+    assert body.index('_loadCertManage(srv)') < body.index("'/api/certs/usage?'"), \
         'a read-only mount should cost one call, not three'
 
 
@@ -119,3 +119,24 @@ def test_the_certs_tab_can_be_filtered():
     body = body[:body.index('const cards = items.map')]
     assert '_certMatchesFilter(cert)' in body and '_certBaseDomain(d) === domain' in body, \
         'the filters have to actually narrow the rendered list'
+
+
+def test_route_delete_asks_the_server_what_else_uses_a_certificate():
+    certs = _read('static', 'js', 'certs.js')
+    body = certs[certs.index('async function _certsForRoutes('):certs.index('async function removeCerts(')]
+    assert "qs.append('exclude'" in body and 'unused_known' in body and '.unused' in body
+    assert 'stillUsed' not in body, \
+        'the browser only saw config-file routes, so a Docker router still using the certificate was missed'
+
+
+def test_certificate_state_is_bound_to_the_server_it_came_from():
+    certs = _read('static', 'js', 'certs.js')
+    send = certs[certs.index('async function _sendCertRemoval('):certs.index('async function _loadCertUsage(')]
+    assert '_tlsSrv()' not in send, \
+        'the removal must go to the server the rows were loaded from, not whichever is selected now'
+    refresh = certs[certs.index('async function refreshCertsTab('):certs.index('let _tlsOptions = [];')]
+    assert '_certLoadSeq' in refresh and 'stale()' in refresh
+    index = _read('templates', 'index.html')
+    switch = index[index.index('function switchServer('):]
+    switch = switch[:switch.index('\n}\n')]
+    assert '_certServerChanged' in switch, 'switching servers must drop the certificate selection'

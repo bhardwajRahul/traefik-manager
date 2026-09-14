@@ -813,6 +813,12 @@ paths:
           name: server
           schema: { type: string }
           description: Agent id. Omit for the Host.
+        - in: query
+          name: exclude
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
+          description: Route id to leave out, as if it were already deleted. Repeat for several.
       responses:
         "200":
           description: Usage verdicts

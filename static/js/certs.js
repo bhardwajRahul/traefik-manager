@@ -124,7 +124,7 @@ function _certDeleteRail(c, main, resolver, sans) {
             + `style="width:15px;height:15px;accent-color:var(--blue);cursor:pointer"></span>`;
     }
     return `<span class="tm-rail" onclick="event.stopPropagation()">`
-        + `<button type="button" class="tm-btn" title="Remove from acme.json" onclick="event.stopPropagation();removeCerts([{main:${_jsArg(main)},resolver:${_jsArg(resolver)},source:${_jsArg(c.source || '')}}])">`
+        + `<button type="button" class="tm-btn" title="Remove from acme.json" onclick="event.stopPropagation();removeCerts([{main:${_jsArg(main)},resolver:${_jsArg(resolver)},source:${_jsArg(c.source || '')}}],{server:${_jsArg(_certsFor)}})">`
         + `<i class="ph-bold ph-trash"></i></button></span>`;
 }
 
@@ -138,6 +138,9 @@ function _certFlagText(c) {
 }
 
 let _certManage = { available: false, reason: '' };
+let _certsFor = null;
+let _certLoadSeq = 0;
+let _certPickedFor = null;
 
 function _certCanDelete() { return !!_certManage.available; }
 
@@ -152,13 +155,22 @@ function toggleCertBulkMode() {
     renderCertCards();
 }
 
+function _scopeCertPicks() {
+    if (_certPickedFor !== _certsFor) {
+        _certPicked.clear();
+        _certPickedFor = _certsFor;
+    }
+}
+
 function toggleCertPick(key) {
+    _scopeCertPicks();
     if (_certPicked.has(key)) _certPicked.delete(key);
     else _certPicked.add(key);
     _paintCertBulkBar();
 }
 
 function selectUnusedCerts() {
+    _scopeCertPicks();
     _allCerts.forEach(c => {
         const v = _certVerdict(c);
         if (v && v.unused && c.resolver && c.resolver !== 'file') _certPicked.add(_certKey(c));
@@ -175,9 +187,16 @@ function _paintCertBulkBar() {
 }
 
 async function bulkRemoveCerts() {
+    if (_certPickedFor !== _certsFor) {
+        _certPicked.clear();
+        _certPickedFor = null;
+        _paintCertBulkBar();
+        renderCertCards();
+        return;
+    }
     const rows = _allCerts.filter(c => _certPicked.has(_certKey(c)));
     if (!rows.length) return;
-    const done = await removeCerts(rows);
+    const done = await removeCerts(rows, { server: _certsFor });
     if (done === false) return;
     _certPicked.clear();
     _certBulk = false;
@@ -186,20 +205,39 @@ async function bulkRemoveCerts() {
     renderCertCards();
 }
 
-async function _loadCertManage() {
+function _certServerChanged() {
+    _certLoadSeq++;
+    _allCerts = [];
+    _certsFor = null;
+    _certUsage = { certs: [], unused_known: false, why: '', resolvers_known: false };
     _certManage = { available: false, reason: '' };
+    _certPicked.clear();
+    _certPickedFor = null;
+    _certBulk = false;
+    document.getElementById('certBulkBtn')?.classList.remove('active-http');
+    const wrap = document.getElementById('certBulkWrap');
+    if (wrap) wrap.style.display = 'none';
+    _paintCertBulkBar();
+}
+
+async function _loadCertManage(srv) {
+    const server = srv === undefined ? _tlsSrv() : srv;
+    let state = { available: false, reason: '' };
     try {
-        const srv = _tlsSrv();
-        const res = await fetch('/api/certs/manage' + (srv ? '?server=' + encodeURIComponent(srv) : ''));
-        if (res.ok) _certManage = await res.json();
+        const res = await fetch('/api/certs/manage' + (server ? '?server=' + encodeURIComponent(server) : ''));
+        if (res.ok) state = await res.json();
     } catch (e) {}
+    if (server === _tlsSrv()) _certManage = state;
+    return state;
 }
 
 async function _certsForRoutes(ids) {
+    const srv = _tlsSrv();
+    const wanted = (ids || []).map(String);
     const pool = window._lastRenderedApps || (typeof APP_DATA !== 'undefined' ? APP_DATA : []) || [];
     const hosts = new Set();
-    (ids || []).forEach(id => {
-        const app = pool.find(a => String(a.id) === String(id));
+    wanted.forEach(id => {
+        const app = pool.find(a => String(a.id) === id);
         if (!app || !app.tls) return;
         [...String(app.rule || '').matchAll(/Host(?:SNI)?\(`([^`]+)`\)/g)].forEach(m => {
             const h = m[1].trim().toLowerCase();
@@ -207,29 +245,45 @@ async function _certsForRoutes(ids) {
         });
     });
     if (!hosts.size) return [];
-    await _loadCertManage();
-    if (!_certCanDelete()) return [];
-    await _loadCertUsage();
+    const manage = await _loadCertManage(srv);
+    if (!manage.available || srv !== _tlsSrv()) return [];
+    let usage = null;
     let certs = [];
     try {
-        const res = await agentFetch('/api/traefik/certs');
-        certs = ((await res.json()) || {}).certs || [];
+        const qs = new URLSearchParams();
+        if (srv) qs.set('server', srv);
+        wanted.forEach(id => qs.append('exclude', id));
+        const [usageRes, certRes] = await Promise.all([
+            fetch('/api/certs/usage?' + qs.toString()),
+            agentFetch('/api/traefik/certs'),
+        ]);
+        if (!usageRes.ok || !certRes.ok) return [];
+        usage = await usageRes.json();
+        certs = ((await certRes.json()) || {}).certs || [];
     } catch (e) { return []; }
-    const stillUsed = new Set();
-    pool.forEach(a => {
-        if (!a.tls || ids.map(String).includes(String(a.id))) return;
-        [...String(a.rule || '').matchAll(/Host(?:SNI)?\(`([^`]+)`\)/g)]
-            .forEach(m => stillUsed.add(m[1].trim().toLowerCase()));
-    });
-    return certs.filter(c => c.resolver && c.resolver !== 'file'
-        && [c.main, ...(c.sans || [])].some(d => hosts.has(String(d).trim().toLowerCase()))
-        && ![c.main, ...(c.sans || [])].some(d => stillUsed.has(String(d).trim().toLowerCase())));
+    if (!usage || !usage.unused_known || srv !== _tlsSrv()) return [];
+    const unused = new Set((usage.certs || []).filter(c => c.unused).map(_certKey));
+    return certs
+        .filter(c => c.resolver && c.resolver !== 'file' && unused.has(_certKey(c))
+            && [c.main, ...(c.sans || [])].some(d => hosts.has(String(d).trim().toLowerCase())))
+        .map(c => Object.assign({}, c, { server: srv }));
 }
 
 async function removeCerts(rows, opts) {
     const list = (rows || []).filter(c => c && c.main);
     if (!list.length) return;
-    if (opts && opts.confirmed) return _sendCertRemoval(list);
+    const server = opts && opts.server !== undefined ? String(opts.server || '')
+                 : list[0].server !== undefined ? String(list[0].server || '')
+                 : String(_certsFor || '');
+    if (server !== _tlsSrv()) {
+        showToast('The server changed, reload the list and select again', 'error');
+        _certPicked.clear();
+        _certPickedFor = null;
+        _paintCertBulkBar();
+        refreshCertsTab();
+        return false;
+    }
+    if (opts && opts.confirmed) return _sendCertRemoval(list, server);
     const names = list.map(c => c.main);
     const shown = names.length <= 6 ? names.join(', ')
                 : names.slice(0, 6).join(', ') + ' and ' + (names.length - 6) + ' more';
@@ -246,18 +300,19 @@ async function removeCerts(rows, opts) {
     }
     notes.push('A copy of acme.json is saved to your backups first, and can be restored from Settings, Backups, Certificates.');
 
+    const where = server && typeof _activeAgent !== 'undefined' && _activeAgent ? ' on ' + _activeAgent.name : '';
     const answer = await _confirmWith({
         message: list.length === 1
-            ? 'Remove ' + shown + ' from acme.json?'
-            : 'Remove ' + list.length + ' certificates from acme.json: ' + shown + '?',
+            ? 'Remove ' + shown + ' from acme.json' + where + '?'
+            : 'Remove ' + list.length + ' certificates from acme.json' + where + ': ' + shown + '?',
         title: list.length === 1 ? 'Remove Certificate' : 'Remove Certificates',
         okLabel: 'Remove', typeWord: 'DELETE', notes,
     });
     if (!answer.ok) return false;
-    return _sendCertRemoval(list);
+    return _sendCertRemoval(list, server);
 }
 
-async function _sendCertRemoval(list) {
+async function _sendCertRemoval(list, server) {
     const canWait = typeof _showRestartOverlay === 'function'
                  && typeof _hideRestartOverlay === 'function'
                  && typeof _waitForReconnect === 'function';
@@ -275,7 +330,7 @@ async function _sendCertRemoval(list) {
         const res = await fetch('/api/certs/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ..._csrfHeaders() },
-            body: JSON.stringify({ server: _tlsSrv(), certs: list.map(c => ({ resolver: c.resolver, main: c.main })) }),
+            body: JSON.stringify({ server: server || '', certs: list.map(c => ({ resolver: c.resolver, main: c.main })) }),
         });
         if (canWait && (res.status === 502 || res.status === 504)) {
             _waitForReconnect(true, () => back());
@@ -312,13 +367,15 @@ async function _sendCertRemoval(list) {
     }
 }
 
-async function _loadCertUsage() {
-    _certUsage = { certs: [], unused_known: false, why: '', resolvers_known: false };
+async function _loadCertUsage(srv) {
+    const server = srv === undefined ? _tlsSrv() : srv;
+    let usage = { certs: [], unused_known: false, why: '', resolvers_known: false };
     try {
-        const srv = _tlsSrv();
-        const res = await fetch('/api/certs/usage' + (srv ? '?server=' + encodeURIComponent(srv) : ''));
-        if (res.ok) _certUsage = await res.json();
+        const res = await fetch('/api/certs/usage' + (server ? '?server=' + encodeURIComponent(server) : ''));
+        if (res.ok) usage = await res.json();
     } catch (e) {}
+    if (server === _tlsSrv()) _certUsage = usage;
+    return usage;
 }
 
 function renderCertCards() {
@@ -375,19 +432,38 @@ function renderCertCards() {
 }
 
 async function refreshCertsTab() {
+    const seq = ++_certLoadSeq;
+    const srv = _tlsSrv();
+    const stale = () => seq !== _certLoadSeq || srv !== _tlsSrv();
+    const settle = () => {
+        if (_certsFor !== srv) {
+            _certManage = { available: false, reason: '' };
+            _certUsage = { certs: [], unused_known: false, why: '', resolvers_known: false };
+        }
+        _certsFor = srv;
+    };
     const container = document.getElementById('certsContent');
     container.innerHTML = `<div class="text-center py-16" style="color:var(--muted)"><i class="ph-light ph-spinner-gap text-4xl block mb-3 animate-spin opacity-40"></i><p>Loading certificates...</p></div>`;
     try {
         const certRes = await agentFetch('/api/traefik/certs');
+        if (stale()) return;
         if (!certRes.ok) {
             const msg = await _errText(certRes, 'Could not load certificate data');
+            if (stale()) return;
+            settle();
+            _allCerts = [];
+            renderCertsVerdict();
             container.innerHTML = `<div class="text-center py-16 rounded-xl" style="color:var(--muted);border:1px solid var(--border)"><i class="ph-light ph-cloud-slash text-5xl block mb-3 opacity-30"></i><p>${_esc(msg)}</p></div>`;
             return;
         }
         const res  = await certRes.json();
+        if (stale()) return;
         const certs = Array.isArray(res.certs) ? res.certs : [];
+        settle();
 
         if (res.error && certs.length === 0) {
+            _allCerts = [];
+            renderCertsVerdict();
             container.innerHTML = _emptyMountState({
                 icon: 'ph-shield',
                 title: 'acme.json not mounted',
@@ -403,6 +479,8 @@ async function refreshCertsTab() {
         }
 
         if (certs.length === 0) {
+            _allCerts = [];
+            renderCertsVerdict();
             container.innerHTML = `<div class="text-center py-16 rounded-xl" style="color:var(--muted);border:1px solid var(--border)">
                 <i class="ph-light ph-shield text-5xl block mb-3 opacity-30"></i>
                 <p class="font-medium">No certificates found</p>
@@ -417,12 +495,14 @@ async function refreshCertsTab() {
         _paintCertDomainFilter();
         renderCertsVerdict();
         renderCertCards();
-        await Promise.all([_loadCertUsage(), _loadCertManage()]);
+        await Promise.all([_loadCertUsage(srv), _loadCertManage(srv)]);
+        if (stale()) return;
         const bulkWrap = document.getElementById('certBulkWrap');
         if (bulkWrap) bulkWrap.style.display = _certCanDelete() ? '' : 'none';
         renderCertsVerdict();
         renderCertCards();
     } catch(e) {
+        if (stale()) return;
         container.innerHTML = `<div class="text-center py-16 rounded-xl" style="color:var(--muted);border:1px solid var(--border)"><i class="ph-light ph-cloud-slash text-5xl block mb-3 opacity-30"></i><p>${_esc(_netErrText(e, 'Could not load certificate data'))}</p></div>`;
     }
 }

@@ -3647,7 +3647,8 @@ def _agent_cert_resolvers_or_none(agent):
 @app.route('/api/certs/usage')
 @login_required
 def api_certs_usage():
-    server = str(request.args.get('server', '')).strip()
+    server  = str(request.args.get('server', '')).strip()
+    exclude = [str(i).strip() for i in request.args.getlist('exclude') if str(i).strip()][:500]
     if server:
         agent = _agent_by_id(server)
         if not agent:
@@ -3662,7 +3663,8 @@ def api_certs_usage():
         configs   = list(_agent_load_configs(agent).values())
         resolvers = _agent_cert_resolvers_or_none(agent)
         ok        = not payload.get('configErrors')
-        result    = _cert_usage.analyze(certs, apps, configs, resolvers, routers_ok=ok, configs_ok=ok)
+        result    = _cert_usage.analyze(certs, apps, configs, resolvers, routers_ok=ok, configs_ok=ok,
+                                        exclude_ids=exclude)
         return jsonify(result)
 
     certs, _errors, _found = _acme_certs_from_paths(_settings.get_acme_json_paths())
@@ -3672,7 +3674,8 @@ def api_certs_usage():
     configs  = [_cfg._load_config_display(p) for p in env.CONFIG_PATHS]
     ok       = not complete
     result   = _cert_usage.analyze(certs, apps, configs, _host_cert_resolvers(),
-                                   routers_ok=ok, configs_ok=not _get_config_parse_errors())
+                                   routers_ok=ok, configs_ok=not _get_config_parse_errors(),
+                                   exclude_ids=exclude)
     return jsonify(result)
 
 

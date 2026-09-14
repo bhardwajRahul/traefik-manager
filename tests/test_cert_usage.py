@@ -233,3 +233,46 @@ def test_without_the_static_config_no_resolver_is_called_orphaned():
 def test_a_file_certificate_has_no_resolver_to_orphan():
     out = _verdict([_cert('a.com', resolver='file')], [], resolvers=['letsencrypt'])
     assert out['certs'][0]['orphaned'] is False and 'resolver_why' not in out['certs'][0]
+
+
+def _with_id(app, route_id, provider='file'):
+    out = dict(app)
+    out['id'] = route_id
+    out['provider'] = provider
+    return out
+
+
+def _row(result, main):
+    return next(r for r in result['certs'] if r['main'] == main)
+
+
+def test_excluded_routes_do_not_hold_their_certificate():
+    certs = [_cert('app.example.com')]
+    apps = [_with_id(_app('Host(`app.example.com`)'), 'app@file')]
+    assert _row(_verdict(certs, apps), 'app.example.com')['unused'] is False
+    after = _verdict(certs, apps, exclude_ids=['app@file'])
+    assert after['unused_known'] is True and _row(after, 'app.example.com')['unused'] is True
+
+
+def test_another_router_still_holds_a_certificate_when_one_is_excluded():
+    certs = [_cert('app.example.com')]
+    apps = [_with_id(_app('Host(`app.example.com`)'), 'app@file'),
+            _with_id(_app('Host(`app.example.com`)'), 'app@docker', provider='docker')]
+    result = _verdict(certs, apps, exclude_ids=['app@file'])
+    assert _row(result, 'app.example.com')['unused'] is False, \
+        'a Docker router still serves this name, so removing the certificate would force a reissue'
+
+
+def test_excluding_a_route_does_not_hide_a_regexp_router():
+    certs = [_cert('app.example.com')]
+    apps = [_with_id(_app('Host(`app.example.com`)'), 'app@file'),
+            _with_id(_app('HostRegexp(`^.+$`)'), 'any@file')]
+    result = _verdict(certs, apps, exclude_ids=['app@file'])
+    assert result['unused_known'] is False and _row(result, 'app.example.com')['unused'] is False
+
+
+def test_a_requested_domain_leaves_with_its_route():
+    certs = [_cert('*.example.com')]
+    apps = [_with_id(_app('Host(`x.example.com`)', tls_domains=[{'main': '*.example.com'}]), 'x@file')]
+    assert _row(_verdict(certs, apps), '*.example.com')['unused'] is False
+    assert _row(_verdict(certs, apps, exclude_ids=['x@file']), '*.example.com')['unused'] is True

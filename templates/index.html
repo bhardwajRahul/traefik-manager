@@ -621,6 +621,7 @@ function switchServer(agentId) {
     if (typeof tabCacheForgetAll === 'function') tabCacheForgetAll();
     if (typeof window.rmServerChanged === 'function') window.rmServerChanged();
     if (typeof window._sdServerChanged === 'function') window._sdServerChanged();
+    if (typeof window._certServerChanged === 'function') window._certServerChanged();
     if (agent) {
         const stored = JSON.parse(localStorage.getItem('tm_tabs_agent_' + agent.id) || '{}');
         const hub = agent.visible_tabs || {};

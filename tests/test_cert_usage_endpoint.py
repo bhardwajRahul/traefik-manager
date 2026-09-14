@@ -92,3 +92,45 @@ def test_the_certs_tab_explains_itself_rather_than_guessing():
     assert '_certUsage.why' in js, 'the strip must say why it cannot tell'
     assert re.search(r"label: 'unused'", js) and re.search(r"label: 'no resolver'", js)
     assert 'tm-warn' in js, 'chips must use the existing card styling'
+
+
+def test_the_endpoint_passes_excluded_routes_for_the_host(client, tmp_path, monkeypatch):
+    _write_acme(tmp_path, monkeypatch)
+    import app as app_mod
+    seen = {}
+    real = app_mod._cert_usage.analyze
+
+    def spy(*a, **kw):
+        seen['exclude'] = list(kw.get('exclude_ids') or [])
+        return real(*a, **kw)
+
+    monkeypatch.setattr(app_mod._cert_usage, 'analyze', spy)
+    res = client.get('/api/certs/usage?exclude=a@file&exclude=b@file&exclude=')
+    assert res.status_code == 200
+    assert seen['exclude'] == ['a@file', 'b@file']
+
+
+def test_the_endpoint_passes_excluded_routes_for_an_agent(client, monkeypatch):
+    import app as app_mod
+    agent = {'id': 'ag1', 'name': 'edge', 'url': 'http://agent.invalid:8090'}
+
+    class _Reply:
+        ok = True
+
+        def json(self):
+            return {'certs': []}
+
+    monkeypatch.setattr(app_mod, '_agent_by_id', lambda i: agent if i == 'ag1' else None)
+    monkeypatch.setattr(app_mod, '_agent_request', lambda *a, **k: _Reply())
+    monkeypatch.setattr(app_mod, '_agent_routes_payload', lambda a, s: {'apps': []})
+    monkeypatch.setattr(app_mod, '_agent_load_configs', lambda a: {})
+    monkeypatch.setattr(app_mod, '_agent_cert_resolvers_or_none', lambda a: None)
+    seen = {}
+
+    def spy(*a, **kw):
+        seen.update(kw)
+        return {'certs': [], 'unused_known': True, 'why': '', 'resolvers_known': False}
+
+    monkeypatch.setattr(app_mod._cert_usage, 'analyze', spy)
+    res = client.get('/api/certs/usage?server=ag1&exclude=r1@file')
+    assert res.status_code == 200 and seen.get('exclude_ids') == ['r1@file']

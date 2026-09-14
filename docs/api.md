@@ -468,7 +468,7 @@ Answers `{"ok": true, "removed": 1, "backup": "acme.json.20260912_191028.bak", "
 
 ### `GET /api/certs/usage`
 
-Which certificates nothing uses, and which were issued by a resolver that no longer exists. Pass `?server=<agent-id>` for an agent; without it the Host is analysed.
+Which certificates nothing uses, and which were issued by a resolver that no longer exists. Pass `?server=<agent-id>` for an agent; without it the Host is analysed. Repeat `?exclude=<route-id>` to answer as if those routes were already deleted.
 
 ```json
 { "certs": [ ... ], "unused_known": true, "why": "", "resolvers_known": true }
