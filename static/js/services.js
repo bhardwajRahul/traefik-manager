@@ -107,15 +107,17 @@ function filterServices(f) {
 
 function renderServicesTable() {
     const search = (document.getElementById('svcSearch')?.value || '').toLowerCase();
-    const anyDownOf = s => {
+    const downOf = s => {
         const m = s.serverStatus;
-        if (!m || typeof m !== 'object') return false;
-        return Object.keys(m).some(k => String(m[k]).toUpperCase() !== 'UP');
+        if (!m || typeof m !== 'object') return 0;
+        const keys = Object.keys(m);
+        const down = keys.filter(k => String(m[k]).toUpperCase() !== 'UP').length;
+        return !down ? 0 : down === keys.length ? 2 : 1;
     };
     const statusOf = s => {
         const st = (s.status || '').toLowerCase();
         if (st === 'disabled' || st === 'error') return 'error';
-        if (st === 'enabled') return anyDownOf(s) ? 'warning' : 'success';
+        if (st === 'enabled') return ['success', 'warning', 'error'][downOf(s)];
         return 'warning';
     };
     const providerOf = s => {

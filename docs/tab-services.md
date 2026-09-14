@@ -23,7 +23,14 @@ Grid view shows the service name with its type and provider below it, a status d
 
 The bar also carries a button to clear every filter and one to refresh the list.
 
-A service Traefik reports as `enabled` counts as a warning when any of its backends is not `UP`, which is what the stat panel's **backends down** count measures. Services whose status Traefik does not report at all also land in the Warnings filter, so the two counts can differ.
+A service Traefik reports as `enabled` counts as an error when none of its backends is `UP`, and as a warning when only some are not. The stat panel's Services card counts services, not servers:
+
+| Count | Services |
+|---|---|
+| **down** | every backend server down |
+| **degraded** | some backend servers down |
+
+The card's summary line is the one that counts servers, as `N of M backends down`. Services whose status Traefik does not report at all also land in the Warnings filter, so the counts can differ.
 
 Composite services (`weighted`, `mirroring`, `failover`, `highestRandomWeight`) carry no backend
 status of their own in Traefik - their health lives on the services they point at. They are counted
