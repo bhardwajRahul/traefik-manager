@@ -6,7 +6,7 @@ from core.config import yaml_safe
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-RUNTIME_SUPPLIED = {'HOSTNAME', 'PATH', 'TZ', 'PWD', 'HOME', 'PATH_INFO', 'SCRIPT_NAME'}
+RUNTIME_SUPPLIED = {'HOSTNAME', 'PATH', 'TZ', 'PWD', 'HOME', 'PATH_INFO', 'SCRIPT_NAME', 'REMOTE_ADDR'}
 READ_BY_A_LIBRARY = {'DOCKER_HOST'}
 READ_IN_A_LOOP = {'STATIC_CONFIG_PATH', 'ACCESS_LOG_PATH', 'ACME_JSON_PATH', 'PLUGINS_DIR'}
 

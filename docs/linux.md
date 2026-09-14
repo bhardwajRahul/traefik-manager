@@ -127,7 +127,7 @@ With one proxy in front (Traefik), the default is correct. If something else sit
 Environment=PROXY_FIX_HOPS=2
 ```
 
-Only count hops you actually control: each trusted hop is one more `X-Forwarded-For` entry a client could forge. The [Client IP Diagnostic](tab-logs.md) in the nav bar shows what the app currently sees.
+Only count hops you actually control: each trusted hop is one more `X-Forwarded-For` entry a client could forge. The [Client IP Diagnostic](tab-logs.md) in the nav bar shows what the app currently sees. Forwarding headers are only read from `TRUSTED_PROXIES`, which by default covers loopback, private and Tailscale addresses.
 :::
 
 **3. Enable and start**

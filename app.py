@@ -235,8 +235,19 @@ class _BasePathMiddleware:
         return self.wsgi_app(environ, start_response)
 
 
+class _TrustedProxyFix:
+    def __init__(self, wsgi_app, hops):
+        self.raw = wsgi_app
+        self.fixed = ProxyFix(wsgi_app, x_for=hops, x_proto=1, x_host=1)
+
+    def __call__(self, environ, start_response):
+        if env.peer_is_trusted(environ.get('REMOTE_ADDR')):
+            return self.fixed(environ, start_response)
+        return self.raw(environ, start_response)
+
+
 app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=PROXY_FIX_HOPS, x_proto=1, x_host=1)
+app.wsgi_app = _TrustedProxyFix(app.wsgi_app, PROXY_FIX_HOPS)
 if env.BASE_PATH:
     app.wsgi_app = _BasePathMiddleware(app.wsgi_app, env.BASE_PATH)
     app.config['APPLICATION_ROOT'] = env.BASE_PATH
@@ -533,6 +544,7 @@ logger.info(f"Backup Dir:     {BACKUP_DIR}")
 logger.info(f"Traefik API:    {_s['traefik_api_url']}")
 logger.info(f"Restart Method: {_restart_meth}")
 logger.info(f"Trusted Hops:   {PROXY_FIX_HOPS}")
+logger.info(f"Trusted Proxies: {', '.join(env.trusted_proxies_list())}")
 logger.info(f"Static Config:  {_static_path if _static_path else 'not configured'}")
 logger.info(f"Domains:        {_s['domains']}")
 logger.info(f"Cert Resolver:  {_s['cert_resolver'] or 'not set'}")
@@ -5021,7 +5033,7 @@ def _classify_ip(ip: str) -> str:
 @login_required
 def api_client_ip_diagnostic():
     orig        = request.environ.get('werkzeug.proxy_fix.orig') or {}
-    socket_peer = orig.get('REMOTE_ADDR', '') or ''
+    socket_peer = orig.get('REMOTE_ADDR', '') or request.environ.get('REMOTE_ADDR', '') or ''
     headers     = {
         'X-Forwarded-For':   request.headers.get('X-Forwarded-For', ''),
         'X-Real-IP':         request.headers.get('X-Real-IP', ''),
@@ -5041,6 +5053,8 @@ def api_client_ip_diagnostic():
         'headers':             headers,
         'forwarded_for_chain': xff_chain,
         'proxy_hops':          PROXY_FIX_HOPS,
+        'proxy_trusted':       env.peer_is_trusted(socket_peer),
+        'trusted_proxies':     env.trusted_proxies_list(),
         'classes':             classes,
     })
 

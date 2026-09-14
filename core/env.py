@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 import os
 
@@ -33,6 +34,44 @@ def proxy_fix_hops() -> int:
 
 
 PROXY_FIX_HOPS = proxy_fix_hops()
+
+DEFAULT_TRUSTED_PROXIES = '127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7,fe80::/10,100.64.0.0/10'
+
+
+def trusted_proxies():
+    raw = os.environ.get('TRUSTED_PROXIES', '').strip() or DEFAULT_TRUSTED_PROXIES
+    if raw == '*':
+        return '*'
+    networks = []
+    for part in raw.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            logger.warning(f"TRUSTED_PROXIES: ignoring {part!r}, it is not an IP address or network")
+    return networks
+
+
+TRUSTED_PROXIES = trusted_proxies()
+
+
+def trusted_proxies_list():
+    return ['*'] if TRUSTED_PROXIES == '*' else [str(n) for n in TRUSTED_PROXIES]
+
+
+def peer_is_trusted(addr) -> bool:
+    if TRUSTED_PROXIES == '*':
+        return True
+    try:
+        ip = ipaddress.ip_address(str(addr or '').split('%')[0])
+    except ValueError:
+        return False
+    mapped = getattr(ip, 'ipv4_mapped', None)
+    if mapped:
+        ip = mapped
+    return any(ip.version == net.version and ip in net for net in TRUSTED_PROXIES)
 
 BACKUP_DIR         = os.environ.get('BACKUP_DIR',    '/app/backups')
 SETTINGS_PATH      = os.environ.get('SETTINGS_PATH', '/app/config/manager.yml')

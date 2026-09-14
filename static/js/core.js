@@ -1221,6 +1221,10 @@ async function loadIpDiagnostic() {
         <div class="rounded-xl p-3 mb-3" style="background:var(--card);border:1px solid var(--border)">
             ${row('App sees (client)', d.effective_ip, d.effective_class)}
             ${row('Socket peer', d.socket_peer, d.socket_peer_class, 'The direct TCP connection - your reverse proxy, or the real client if none.')}
+            <div class="flex items-center gap-2 py-2" style="border-bottom:1px solid var(--border)">
+                <span class="text-xs" style="color:var(--muted);min-width:120px">Proxy trusted</span>
+                <span class="text-xs font-mono" style="color:var(--text)">${d.proxy_trusted === undefined ? '-' : (d.proxy_trusted ? 'yes' : 'no')}</span>
+            </div>
             <div class="flex items-center gap-2 py-2">
                 <span class="text-xs" style="color:var(--muted);min-width:120px">Trusted hops</span>
                 <span class="text-xs font-mono" style="color:var(--text)">${d.proxy_hops}</span>
@@ -1230,6 +1234,7 @@ async function loadIpDiagnostic() {
         <div class="rounded-xl p-3 mb-3" style="background:var(--card);border:1px solid var(--border)">
             ${hdrRows}
         </div>
+        ${d.proxy_trusted === false && ((d.headers || {})['X-Forwarded-For'] || (d.headers || {})['X-Forwarded-Proto'] || (d.headers || {})['X-Forwarded-Host']) ? `<div class="rounded-xl p-3 mb-3 text-xs" style="background:rgba(210,153,34,0.1);border:1px solid rgba(210,153,34,0.3);color:var(--text)"><i class="ph-bold ph-warning" style="color:var(--yellow);margin-right:6px"></i>Forwarding headers arrived from <strong>${_esc(d.socket_peer || '')}</strong>, which is not in <code class="font-mono">TRUSTED_PROXIES</code>, so they were ignored. If that address is your reverse proxy, add it to <code class="font-mono">TRUSTED_PROXIES</code>.</div>` : ''}
         ${spoofable ? `<div class="rounded-xl p-3 text-xs" style="background:rgba(210,153,34,0.1);border:1px solid rgba(210,153,34,0.3);color:var(--text)"><i class="ph-bold ph-warning" style="color:var(--yellow);margin-right:6px"></i>The client IP the app trusts is <strong>${_esc(d.effective_class)}</strong>. If clients should reach you from the public internet, a proxy in front is rewriting it - check that your trusted hops and the upstream <code class="font-mono">trustedIPs</code> are set correctly, or real client IPs will be lost to logs, CrowdSec and ipAllowList.</div>` : ''}`;
 }
 

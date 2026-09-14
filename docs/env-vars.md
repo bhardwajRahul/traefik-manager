@@ -114,6 +114,7 @@ from `manager.yml` and restart.
 | `INACTIVITY_TIMEOUT_MINUTES` | `120` | - | Log out after this many minutes of inactivity |
 | `OTP_ENCRYPTION_KEY` | _(auto-generated)_ | - | Fernet key for every secret stored encrypted in `manager.yml` |
 | `PROXY_FIX_HOPS` | `1` | - | Number of trusted proxy hops in front of Traefik Manager for `X-Forwarded-For` |
+| `TRUSTED_PROXIES` | loopback, private and CGNAT ranges | - | Addresses allowed to set `X-Forwarded-For`, `-Proto` and `-Host`. `*` trusts every peer |
 | `WEB_CONCURRENCY` | `2` | - | Worker processes. Each costs about 50 MB. Raise for more fault isolation, not for speed |
 | `GUNICORN_THREADS` | `4` | - | Requests served at once per worker. Traefik Manager spends most of its time waiting on Traefik and on agents, so threads are what make pages load in parallel. `WEB_CONCURRENCY x GUNICORN_THREADS` is the total |
 | `GUNICORN_TIMEOUT` | `60` | - | Seconds before the supervisor restarts a worker that has stopped responding. A restart drops every request that worker is handling, so leave room above the 15 second agent timeout |
@@ -890,6 +891,28 @@ provider to include the prefix, or sign in will fail after the redirect.
 :::
 
 Use a sub domain instead where you can. It needs no configuration on either side.
+
+---
+
+### `TRUSTED_PROXIES`
+
+**Default:** `127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7,fe80::/10,100.64.0.0/10`
+
+Comma-separated addresses or networks allowed to set forwarding headers. A request from any other address has its `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` ignored, so a client that reaches Traefik Manager directly cannot choose its own IP for the login rate limit or the audit log. The default covers Docker networks, a LAN, loopback and Tailscale. If your reverse proxy connects from a public address, add that address, or set `*` to trust every peer.
+
+The active list is shown in the startup log as `Trusted Proxies` and in the Client IP Diagnostic.
+
+:::tabs
+== Docker / Podman
+```yaml
+environment:
+  - TRUSTED_PROXIES=203.0.113.10,172.16.0.0/12
+```
+== Linux (systemd)
+```ini
+Environment=TRUSTED_PROXIES=203.0.113.10,172.16.0.0/12
+```
+:::
 
 ---
 

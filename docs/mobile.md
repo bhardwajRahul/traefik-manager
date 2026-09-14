@@ -272,7 +272,7 @@ A valid file can still be a broken one. Removing an entry point or disabling the
 
 ### Diagnostics
 
-What the server sees for your request: the trusted client IP that feeds the login rate limiter, audit log, `ipAllowList` and CrowdSec; the raw socket peer before any header is trusted; the trusted proxy hop count (`PROXY_FIX_HOPS`); the `X-Forwarded-For` chain and the forwarding headers as received. Each address is tagged public, private, CGNAT, loopback or link-local, so a private trusted IP alongside forwarding headers - the signature of a wrong `trustedIPs` or hop count - is visible at a glance.
+What the server sees for your request: the trusted client IP that feeds the login rate limiter, audit log, `ipAllowList` and CrowdSec; the raw socket peer before any header is trusted; the trusted proxy hop count (`PROXY_FIX_HOPS`) and whether the socket peer is a trusted proxy (`TRUSTED_PROXIES`); the `X-Forwarded-For` chain and the forwarding headers as received. Each address is tagged public, private, CGNAT, loopback or link-local, so a private trusted IP alongside forwarding headers - the signature of a wrong `trustedIPs` or hop count - is visible at a glance.
 
 ---
 
