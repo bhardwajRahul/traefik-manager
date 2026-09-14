@@ -1215,6 +1215,26 @@ func validGitURL(u string) bool {
 		strings.HasPrefix(l, "git://")
 }
 
+func ssrfOK(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	ips, err := net.LookupIP(u.Hostname())
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			return false
+		}
+		if v4 := ip.To4(); v4 != nil && v4[0] >= 240 {
+			return false
+		}
+	}
+	return true
+}
+
 func sameGitRemote(a, b string) bool {
 	if a == "" || b == "" {
 		return false
@@ -1450,6 +1470,10 @@ func (a *App) gitTestHandler(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid repository URL scheme", http.StatusBadRequest)
 		return
 	}
+	if !ssrfOK(repo) {
+		jsonError(w, "target address not allowed", http.StatusBadRequest)
+		return
+	}
 	tmpDir, err := os.MkdirTemp("", "tma-git-test-*")
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -1457,7 +1481,7 @@ func (a *App) gitTestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(tmpDir)
 	creds := gitCreds{username: username, token: token}
-	_, errOut, rc := a.gitRun([]string{"ls-remote", "--quiet", "--", repo}, tmpDir, creds)
+	_, errOut, rc := a.gitRun([]string{"-c", "http.followRedirects=false", "ls-remote", "--quiet", "--", repo}, tmpDir, creds)
 	if rc != 0 {
 		if token != "" {
 			errOut = strings.ReplaceAll(errOut, token, "***")

@@ -4,6 +4,7 @@ import re
 import shutil
 import threading
 from io import StringIO
+from urllib.parse import urlsplit
 
 from ruamel.yaml import YAML
 
@@ -131,6 +132,21 @@ def safe_api_url(url: str) -> str:
         return url
     logger.warning(f"Blocked unsafe API URL: {url!r}")
     return ''
+
+
+def same_api_origin(a: str, b: str) -> bool:
+    try:
+        left, right = urlsplit(str(a or '').strip()), urlsplit(str(b or '').strip())
+        left_port, right_port = left.port, right.port
+    except ValueError:
+        return False
+    if not (left.scheme and left.hostname and right.scheme and right.hostname):
+        return False
+    defaults = {'http': 80, 'https': 443}
+    return (left.scheme.lower() == right.scheme.lower()
+            and left.hostname.lower() == right.hostname.lower()
+            and (left_port or defaults.get(left.scheme.lower())) == (right_port or defaults.get(right.scheme.lower()))
+            and left.path.rstrip('/') == right.path.rstrip('/'))
 
 
 def sanitize_go_templates(raw):

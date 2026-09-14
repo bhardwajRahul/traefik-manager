@@ -638,7 +638,7 @@ Get current application settings. Every secret is stripped. Five come back as a 
 
 Update settings. Full replace, not a patch: `domains` is required (`400` without it) and any omitted field resets to its default, so send the current values you want to keep.
 
-Exceptions: `git_backup_*`, `backup_keep_count`, `default_theme` and `notification_channels` are updated only when present, and blank `traefik_api_password`, `crowdsec_api_key`, `crowdsec_machine_password`, `webhook_password` and `git_backup_token` keep the stored secret.
+Exceptions: `git_backup_*`, `backup_keep_count`, `default_theme` and `notification_channels` are updated only when present, and blank `traefik_api_password`, `crowdsec_api_key`, `crowdsec_machine_password`, `webhook_password` and `git_backup_token` keep the stored secret. A blank `traefik_api_password` is refused with `400` when `traefik_api_url` moves to a different host, port or path, so the stored password is never sent somewhere new.
 
 Returns `{ "success": true, "settings": { ... } }` with secrets stripped. `400` for a missing domain, an invalid `traefik_api_url`, an unsupported `git_backup_repo` scheme, a `crowdsec_alert_limit` that is not a whole number ("Alert limit must be a whole number") or one outside 0-100000 ("Alert limit must be between 0 and 100000").
 
@@ -687,7 +687,7 @@ Known keys: `dashboard`, `routemap`, `docker`, `kubernetes`, `swarm`, `nomad`, `
 
 ### `POST /api/settings/test-connection`
 
-Test connectivity to a Traefik API URL before saving. Accepts optional credentials for auth-protected dashboards.
+Test connectivity to a Traefik API URL before saving. Accepts optional credentials for auth-protected dashboards. Without `password`, the saved credentials are sent only when `url` matches the saved Traefik API URL.
 
 ```json
 { "url": "http://traefik:8080", "user": "admin", "password": "secret" }
@@ -904,7 +904,7 @@ Test repository credentials without pushing, via `git ls-remote`. Falls back to 
 { "repo_url": "https://github.com/you/configs", "username": "you", "token": "ghp_..." }
 ```
 
-Returns `{ "ok": true }`, or `400` with the git error. Tokens are redacted from the message.
+Returns `{ "ok": true }`, or `400` with the git error. Tokens are redacted from the message. Link-local, multicast and reserved targets are refused, and redirects are not followed.
 
 ---
 

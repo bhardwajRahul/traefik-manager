@@ -35,6 +35,7 @@ _readable_config_path  = _cfg.readable_config_path
 _is_safe_path          = _cfg.is_safe_path
 _resolve_config_path   = _cfg.resolve_config_path
 _safe_api_url          = _cfg.safe_api_url
+_same_api_origin       = _cfg.same_api_origin
 _sanitize_go_templates = _cfg.sanitize_go_templates
 _restore_go_templates  = _cfg.restore_go_templates
 load_config            = _cfg.load_config
@@ -1060,10 +1061,17 @@ def _setup_open() -> bool:
     return not load_settings().get('setup_complete', False)
 
 
+def _setup_probe_allowed() -> bool:
+    _auth._check_inactivity()
+    if not _auth_required() or not _has_password_set():
+        return True
+    return bool(session.get('authenticated'))
+
+
 @app.route('/setup/test-crowdsec', methods=['POST'])
 @limiter.limit("10 per minute")
 def setup_test_crowdsec():
-    if not _setup_open():
+    if not _setup_open() or not _setup_probe_allowed():
         abort(404)
     _check_csrf()
     data = request.get_json(silent=True) or {}
@@ -1088,7 +1096,7 @@ def setup_test_crowdsec():
 @app.route('/setup/test-git', methods=['POST'])
 @limiter.limit("10 per minute")
 def setup_test_git():
-    if not _setup_open():
+    if not _setup_open() or not _setup_probe_allowed():
         abort(404)
     _check_csrf()
     data     = request.get_json(silent=True) or {}
@@ -1098,10 +1106,13 @@ def setup_test_git():
         return jsonify({'ok': False, 'error': 'No repository URL'}), 400
     if not _valid_git_url(repo_url):
         return jsonify({'ok': False, 'error': 'Unsupported URL - use https://, http://, ssh:// or git://'}), 400
+    if not _ssrf_ok(repo_url):
+        return jsonify({'ok': False, 'error': 'Target address not allowed'}), 400
     creds = {'username': str(data.get('username', '')).strip(), 'token': token} if token else None
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
-        _, err, rc = _git_run(['ls-remote', '--quiet', '--', repo_url], cwd=tmpdir, credentials=creds)
+        _, err, rc = _git_run(['ls-remote', '--quiet', '--', repo_url], cwd=tmpdir, credentials=creds,
+                              extra_config=['http.followRedirects=false'])
     if rc == 0:
         return jsonify({'ok': True})
     safe = err.replace(token, '***') if token else err
@@ -3988,10 +3999,13 @@ def api_git_backup_test():
         return jsonify({'ok': False, 'error': 'No repository URL configured'}), 400
     if not _valid_git_url(repo_url):
         return jsonify({'ok': False, 'error': 'Unsupported URL - use https://, http://, ssh:// or git://'}), 400
+    if not _ssrf_ok(repo_url):
+        return jsonify({'ok': False, 'error': 'Target address not allowed'}), 400
     creds = {'username': username, 'token': token} if token else None
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
-        _, err, rc = _git_run(['ls-remote', '--quiet', '--', repo_url], cwd=tmpdir, credentials=creds)
+        _, err, rc = _git_run(['ls-remote', '--quiet', '--', repo_url], cwd=tmpdir, credentials=creds,
+                              extra_config=['http.followRedirects=false'])
     if rc == 0:
         return jsonify({'ok': True})
     safe_err = err.replace(token, '***') if token else err
@@ -4766,6 +4780,9 @@ def api_save_settings():
         if not crowdsec_machine_password:
             crowdsec_machine_password = existing.get('crowdsec_machine_password', '')
         if not traefik_api_password:
+            if (existing.get('traefik_api_password') and traefik_api_user
+                    and not _same_api_origin(traefik_api_url, existing.get('traefik_api_url', ''))):
+                return jsonify({'error': 'Re-enter the Traefik API password when changing the API URL'}), 400
             traefik_api_password = existing.get('traefik_api_password', '')
         if not git_backup_token:
             git_backup_token = existing.get('git_backup_token', '')
@@ -4845,11 +4862,15 @@ def api_settings_test_connection():
         return jsonify({'ok': False, 'error': 'Target address not allowed'}), 400
     u = str(data.get('user', '')).strip()
     p = str(data.get('password', '')).strip()
+    withheld = False
     if not p:
-        stored   = load_settings()
-        if not u:
-            u = stored.get('traefik_api_user', '')
-        p = stored.get('traefik_api_password', '')
+        stored = load_settings()
+        if _same_api_origin(url, stored.get('traefik_api_url', '')):
+            if not u:
+                u = stored.get('traefik_api_user', '')
+            p = stored.get('traefik_api_password', '')
+        else:
+            withheld = bool(stored.get('traefik_api_password'))
     auth = (u, p) if u and p else None
     logger.info(f"Connection test to {url!r} by {request.remote_addr}")
     try:
@@ -4858,7 +4879,9 @@ def api_settings_test_connection():
             info = resp.json()
             return jsonify({'ok': True, 'version': info.get('Version', '?')})
         if resp.status_code in (401, 403):
-            return jsonify({'ok': False, 'error': f'HTTP {resp.status_code} - check the API username and password'})
+            hint = (' - the saved password is only sent to the saved API URL, enter it to test this one'
+                    if withheld else ' - check the API username and password')
+            return jsonify({'ok': False, 'error': f'HTTP {resp.status_code}{hint}'})
         return jsonify({'ok': False, 'error': f'HTTP {resp.status_code} from {url}/api/version'})
     except requests.exceptions.SSLError as e:
         return jsonify({'ok': False, 'error': f'TLS verification failed - the API certificate is not trusted. Mount your CA into /etc/ssl/certs/ca-certificates.crt or set TRAEFIK_INSECURE_SKIP_VERIFY=true. ({str(e)[:120]})'})

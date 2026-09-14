@@ -56,7 +56,7 @@ TM handles authentication automatically when proxying calls through `/api/agents
 | POST | `/api/backup/delete/<filename>` | Delete a `.bak` backup file |
 | GET | `/api/backup/git/status` | Git backup status |
 | POST | `/api/backup/git/push` | Manual git push |
-| POST | `/api/backup/git/test` | Test git connectivity |
+| POST | `/api/backup/git/test` | Test git connectivity. Refuses link-local targets and does not follow redirects |
 | GET | `/api/backup/git/commits` | Last 50 commits |
 | GET | `/api/backup/git/commit/<sha>/diff` | Per-file diff for a commit |
 | POST | `/api/backup/git/restore/<sha>` | Restore configs from a git commit |

@@ -38,7 +38,7 @@ def _git_askpass_path() -> str:
         os.chmod(p, 0o700)
     return p
 
-def _git_run(args, cwd=None, credentials=None):
+def _git_run(args, cwd=None, credentials=None, extra_config=None):
     env = os.environ.copy()
     env['GIT_TERMINAL_PROMPT'] = '0'
     env['GIT_AUTHOR_NAME'] = 'Traefik Manager'
@@ -52,7 +52,7 @@ def _git_run(args, cwd=None, credentials=None):
     else:
         env['GIT_ASKPASS'] = ''
     result = subprocess.run(
-        ['git'] + _GIT_PROTO_HARDENING + args,
+        ['git'] + _GIT_PROTO_HARDENING + [part for item in (extra_config or []) for part in ('-c', item)] + args,
         cwd=cwd or _git_repo_dir(),
         capture_output=True,
         text=True,

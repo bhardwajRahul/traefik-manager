@@ -146,14 +146,16 @@ The sign-in form is deliberately untouched, so your password manager still works
 
 ## Outbound requests (SSRF protection)
 
-Several features make TM issue outbound HTTP requests on your behalf - the Traefik connection tests, the CrowdSec setup test, the webhook test, the URL ping tool, and the OIDC provider test. To prevent these from being used to reach cloud metadata endpoints, these fetchers reject:
+Several features make TM issue outbound requests on your behalf - the Traefik connection tests, the CrowdSec setup test, the git connection tests, the webhook test, the URL ping tool, and the OIDC provider test. To prevent these from being used to reach cloud metadata endpoints, these fetchers reject:
 
 - Link-local addresses (`169.254.0.0/16`, including the `169.254.169.254` cloud metadata IP)
 - Multicast, reserved, and unspecified addresses
 
 Private and loopback targets are still allowed, because reaching internal services (e.g. `http://traefik:8080`) is the normal, legitimate use for a self-hosted reverse-proxy manager. Redirects are not followed on the ping tool.
 
-The git setup test is the exception: it runs `git ls-remote`, so it is restricted by URL scheme rather than by destination address.
+The git connection tests run `git ls-remote` under the same address rules and do not follow redirects, on the Host and on agents. The setup page's checks answer only a signed-in admin.
+
+A saved Traefik API password is only sent to the saved API URL. Testing a different URL, or saving one on a different host, port or path, needs the password typed again.
 
 ---
 
