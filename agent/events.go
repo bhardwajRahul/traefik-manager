@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -23,10 +25,19 @@ type eventLog struct {
 	mu     sync.Mutex
 	nextID int64
 	items  []Event
+	boot   string
 }
 
 func newEventLog() *eventLog {
-	return &eventLog{nextID: 1}
+	return &eventLog{nextID: 1, boot: newBootToken()}
+}
+
+func newBootToken() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b)
 }
 
 func (e *eventLog) record(kind, message string) {
@@ -83,10 +94,14 @@ func (a *App) eventsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		since = parsed
 	}
+	if boot := r.URL.Query().Get("boot"); boot != "" && boot != a.events.boot {
+		since = 0
+	}
 	items := a.events.since(since)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"events": items,
 		"latest": a.events.latestID(),
+		"boot":   a.events.boot,
 	})
 }

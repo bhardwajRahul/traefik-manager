@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from urllib.parse import quote
 
 import requests
 
@@ -582,6 +583,40 @@ _AGENT_EVENT_LABELS = {
 }
 
 
+def _event_cursor(stored):
+    if isinstance(stored, dict):
+        boot = str(stored.get('boot') or '') or None
+        stored = stored.get('id')
+    else:
+        boot = None
+    try:
+        return boot, max(0, int(stored or 0))
+    except (TypeError, ValueError):
+        return boot, 0
+
+
+def _agent_events_reply(agent, path):
+    try:
+        resp = agents_http_mod._agent_request(agent, 'GET', path)
+    except Exception as e:
+        logger.debug(f"Agent event poll failed for {agent.get('name', '')}: {e}")
+        return None
+    if resp is None or getattr(resp, 'status_code', 0) != 200:
+        return None
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _event_latest(data):
+    try:
+        return max(0, int(data.get('latest') or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _check_agent_events():
     state  = _section('agent_events')
     raised = []
@@ -591,27 +626,29 @@ def _check_agent_events():
         if not agent_id or not _agent_usable(agent):
             seen[agent_id] = state.get(agent_id, 0)
             continue
-        since = state.get(agent_id)
-        try:
-            resp = agents_http_mod._agent_request(
-                agent, 'GET', f'/api/events?since={int(since or 0)}')
-        except Exception as e:
-            logger.debug(f"Agent event poll failed for {agent.get('name', '')}: {e}")
-            seen[agent_id] = since or 0
+        stored = state.get(agent_id)
+        boot, since = _event_cursor(stored)
+        query = f'/api/events?since={since}' + (f'&boot={quote(boot, safe="")}' if boot else '')
+        data = _agent_events_reply(agent, query)
+        if data is None:
+            seen[agent_id] = {'boot': boot, 'id': since}
             continue
-        if resp is None or getattr(resp, 'status_code', 0) != 200:
-            seen[agent_id] = since or 0
+        events     = data.get('events') or []
+        latest     = _event_latest(data)
+        reply_boot = str(data.get('boot') or '') or None
+        seen[agent_id] = {'boot': reply_boot, 'id': latest}
+        if stored is None:
             continue
-        try:
-            data = resp.json() or {}
-        except Exception:
-            seen[agent_id] = since or 0
-            continue
-        events = data.get('events') or []
-        latest = data.get('latest') or since or 0
-        seen[agent_id] = latest
-        if since is None:
-            continue
+        if not (reply_boot and boot) and latest < since:
+            events = []
+            if latest > 0:
+                again = _agent_events_reply(agent, '/api/events?since=0')
+                if again is None:
+                    seen[agent_id] = {'boot': reply_boot, 'id': 0}
+                else:
+                    events = again.get('events') or []
+                    seen[agent_id] = {'boot': str(again.get('boot') or '') or reply_boot,
+                                      'id': _event_latest(again)}
         name = str(agent.get('name') or agent_id)
         for item in events[-AGENT_EVENT_MAX:]:
             kind = str(item.get('kind') or '')

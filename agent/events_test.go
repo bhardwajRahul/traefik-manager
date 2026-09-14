@@ -181,3 +181,51 @@ func TestConfigWriteIsRefusedWhenTheBackupFails(t *testing.T) {
 		t.Fatal("the failure must be recorded as an event")
 	}
 }
+
+func eventsReply(t *testing.T, app *App, query string) ([]Event, int64, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	app.eventsHandler(rec, httptest.NewRequest(http.MethodGet, "/api/events"+query, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Events []Event `json:"events"`
+		Latest int64   `json:"latest"`
+		Boot   string  `json:"boot"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	return body.Events, body.Latest, body.Boot
+}
+
+func TestEventLogsHaveDistinctBootTokens(t *testing.T) {
+	a, b := newEventLog(), newEventLog()
+	if a.boot == "" || a.boot == b.boot {
+		t.Fatalf("each agent process needs its own boot token, got %q and %q", a.boot, b.boot)
+	}
+}
+
+func TestEventsHandlerHonoursTheCursorForTheSameBoot(t *testing.T) {
+	app := &App{cfg: &Config{}, events: newEventLog()}
+	app.events.record("git", "one")
+	app.events.record("git", "two")
+	events, latest, boot := eventsReply(t, app, "?since=1")
+	if boot != app.events.boot || latest != 2 || len(events) != 1 {
+		t.Fatalf("boot %q latest %d events %+v", boot, latest, events)
+	}
+	if events, _, _ = eventsReply(t, app, "?since=1&boot="+boot); len(events) != 1 {
+		t.Fatalf("a matching boot must keep the cursor, got %+v", events)
+	}
+}
+
+func TestEventsHandlerReplaysTheRingForAnotherBoot(t *testing.T) {
+	app := &App{cfg: &Config{}, events: newEventLog()}
+	app.events.record("storage", "config directory is not writable")
+	app.events.record("git", "auto-push failed")
+	events, _, _ := eventsReply(t, app, "?since=57&boot=from-before-the-restart")
+	if len(events) != 2 {
+		t.Fatalf("a cursor from an earlier process must not hide this process's events, got %+v", events)
+	}
+}

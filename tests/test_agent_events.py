@@ -23,7 +23,7 @@ def agent_events(monkeypatch):
 
     def fake_request(a, method, path):
         calls.append(path)
-        return replies.get('resp')
+        return replies.get('by_path', {}).get(path, replies.get('resp'))
 
     monkeypatch.setattr(monitor.agents_http_mod, '_agent_request', fake_request)
     monitor._state.clear()
@@ -41,7 +41,7 @@ def test_the_first_poll_only_records_a_baseline(agent_events):
         'latest': 1,
     })
     assert _run() == [], 'history from before the hub was watching must not be replayed'
-    assert monitor._section('agent_events')['a1'] == 1
+    assert monitor._section('agent_events')['a1']['id'] == 1
 
 
 def test_new_failures_are_raised_once(agent_events):
@@ -74,7 +74,7 @@ def test_an_unreachable_agent_keeps_its_cursor(agent_events):
     _run()
     agent_events['replies']['usable'] = False
     assert _run() == []
-    assert monitor._section('agent_events')['a1'] == 4, \
+    assert monitor._section('agent_events')['a1']['id'] == 4, \
         'losing the cursor would replay every event when the agent comes back'
 
 
@@ -83,7 +83,7 @@ def test_a_failed_poll_does_not_lose_the_cursor(agent_events):
     _run()
     agent_events['replies']['resp'] = _Resp(502)
     assert _run() == []
-    assert monitor._section('agent_events')['a1'] == 9
+    assert monitor._section('agent_events')['a1']['id'] == 9
 
 
 def test_a_flood_is_capped(agent_events):
@@ -128,3 +128,78 @@ def test_the_category_is_one_channels_already_know(agent_events):
     agent_events['replies']['resp'] = _Resp(200, {
         'events': [{'id': 1, 'kind': 'git', 'message': 'boom'}], 'latest': 1})
     assert _run()[0][2] in settings.CHANNEL_CATEGORIES
+
+
+def _ev(*ids, kind='git'):
+    return [{'id': i, 'kind': kind, 'message': f'failure {i}'} for i in ids]
+
+
+def test_the_boot_is_sent_once_known(agent_events):
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 7, 'boot': 'b1'})
+    _run()
+    _run()
+    assert agent_events['calls'][0] == '/api/events?since=0'
+    assert agent_events['calls'][-1] == '/api/events?since=7&boot=b1'
+
+
+def test_a_matching_boot_uses_the_cursor(agent_events):
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 7, 'boot': 'b1'})
+    _run()
+    agent_events['replies']['resp'] = _Resp(200, {'events': _ev(8), 'latest': 8, 'boot': 'b1'})
+    assert len(_run()) == 1
+    assert monitor._section('agent_events')['a1'] == {'boot': 'b1', 'id': 8}
+
+
+def test_a_changed_boot_raises_every_event_in_the_new_ring(agent_events):
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 57, 'boot': 'old'})
+    _run()
+    agent_events['replies']['resp'] = _Resp(200, {'events': _ev(1, 2, kind='storage'), 'latest': 2, 'boot': 'new'})
+    raised = _run()
+    assert len(raised) == 2 and 'storage' in raised[0][1], \
+        'events recorded after an agent restart were hidden behind the old cursor'
+    assert monitor._section('agent_events')['a1'] == {'boot': 'new', 'id': 2}
+
+
+def test_an_agent_without_boot_falls_back_to_id_regression(agent_events):
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 57})
+    _run()
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 3})
+    agent_events['replies']['by_path'] = {'/api/events?since=0': _Resp(200, {'events': _ev(1, 2, 3), 'latest': 3})}
+    raised = _run()
+    assert len(raised) == 3
+    assert agent_events['calls'][-1] == '/api/events?since=0'
+    assert monitor._section('agent_events')['a1']['id'] == 3
+
+
+def test_a_restart_with_an_empty_log_resets_the_cursor(agent_events):
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 57})
+    _run()
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 0})
+    assert _run() == []
+    agent_events['replies']['resp'] = _Resp(200, {'events': _ev(1), 'latest': 1})
+    assert len(_run()) == 1, 'the first failure after a restart was skipped'
+
+
+def test_a_failed_second_read_starts_over_from_zero(agent_events):
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 57})
+    _run()
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 3})
+    agent_events['replies']['by_path'] = {'/api/events?since=0': _Resp(502)}
+    assert _run() == []
+    assert monitor._section('agent_events')['a1']['id'] == 0
+
+
+def test_a_legacy_int_state_is_read_and_upgraded(agent_events):
+    monitor._section('agent_events')['a1'] = 57
+    agent_events['replies']['resp'] = _Resp(200, {'events': _ev(58), 'latest': 58, 'boot': 'b1'})
+    assert len(_run()) == 1, 'an upgrade must neither replay history nor skip the next failure'
+    assert agent_events['calls'][-1] == '/api/events?since=57'
+    assert monitor._section('agent_events')['a1'] == {'boot': 'b1', 'id': 58}
+
+
+def test_an_unreachable_agent_keeps_its_boot_and_cursor(agent_events):
+    agent_events['replies']['resp'] = _Resp(200, {'events': [], 'latest': 4, 'boot': 'b1'})
+    _run()
+    agent_events['replies']['resp'] = _Resp(502)
+    assert _run() == []
+    assert monitor._section('agent_events')['a1'] == {'boot': 'b1', 'id': 4}

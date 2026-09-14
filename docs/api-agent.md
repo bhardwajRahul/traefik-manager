@@ -25,7 +25,7 @@ TM handles authentication automatically when proxying calls through `/api/agents
 | Method | Path | Description |
 |---|---|---|
 | GET | `/health` | Health check - no auth required |
-| GET | `/api/events` | Failures the agent could not report in a response, newest last - `?since=<id>` returns only newer ones |
+| GET | `/api/events` | Failures the agent could not report in a response, newest last - `?since=<id>&boot=<token>` returns only newer ones |
 | GET | `/api/traefik/overview` | Traefik API overview |
 | GET | `/api/traefik/routers` | Routers across all protocols - returns `{"http":[...],"tcp":[...],"udp":[...]}` |
 | GET | `/api/traefik/router/{protocol}/{name}` | One router as Traefik reports it, including its provider labels |
@@ -74,7 +74,7 @@ failure there has no response left to report in, so the agent keeps the last 100
 Traefik Manager collects them every two minutes and raises them as notifications.
 
 ```
-GET /api/events?since=12
+GET /api/events?since=12&boot=5f0c9a1e2b7d4c38a6e1f09b3d2c7a41
 ```
 
 ```json
@@ -82,12 +82,12 @@ GET /api/events?since=12
   "events": [
     { "id": 13, "at": 1756574400, "kind": "git", "message": "auto-push failed: no remote" }
   ],
-  "latest": 13
+  "latest": 13,
+  "boot": "5f0c9a1e2b7d4c38a6e1f09b3d2c7a41"
 }
 ```
 
-Pass the previous `latest` back as `since` to get only what is new. `kind` is one of `git`,
-`restart`, `backup` or `storage`. The list lives in memory, so it starts empty after a restart.
+Pass the previous `latest` back as `since` and the previous `boot` back as `boot` to get only what is new. `boot` changes every time the agent starts, and a `boot` that no longer matches returns every event, since IDs start again at 1. `kind` is one of `git`, `restart`, `backup` or `storage`. The list lives in memory, so it starts empty after a restart.
 
 ## Health check
 

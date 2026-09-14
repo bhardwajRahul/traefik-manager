@@ -389,7 +389,7 @@ side and the Host collects them:
 | What | Behaviour |
 |---|---|
 | Where they are kept | A ring of the 100 most recent events on the agent, read back through `GET /api/events` |
-| How they arrive | The Host polls every agent every two minutes and raises what it has not seen, up to ten per cycle |
+| How they arrive | The Host polls every agent every two minutes and raises what it has not seen, up to ten per cycle, including failures recorded after the agent restarted |
 | Where they show up | Notifications under the **Agents** category, prefixed with the agent's name |
 | What is reported | Failed git pushes, failed Traefik restarts, failed backups, and unwritable directories |
 
