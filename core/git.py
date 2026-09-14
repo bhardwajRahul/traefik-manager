@@ -13,7 +13,8 @@ from core.env import logger
 _GIT_ALLOWED_SCHEMES = ('https://', 'http://', 'ssh://', 'git://')
 _GIT_PROTO_HARDENING = ['-c', 'protocol.ext.allow=never',
                         '-c', 'protocol.file.allow=user',
-                        '-c', 'protocol.fd.allow=user']
+                        '-c', 'protocol.fd.allow=user',
+                        '-c', 'credential.helper=']
 
 
 def _git_repo_dir():

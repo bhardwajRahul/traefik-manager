@@ -1180,7 +1180,7 @@ func (a *App) gitAskpassScript() (string, error) {
 }
 
 func (a *App) gitRun(args []string, cwd string, creds ...gitCreds) (string, string, int) {
-	full := append([]string{"-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user", "-c", "protocol.fd.allow=user"}, args...)
+	full := append([]string{"-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user", "-c", "protocol.fd.allow=user", "-c", "credential.helper="}, args...)
 	cmd := exec.Command("git", full...)
 	if cwd == "" {
 		cwd = a.gitRepoDir()
