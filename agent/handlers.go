@@ -257,7 +257,7 @@ func (a *App) configsWriteHandler(w http.ResponseWriter, r *http.Request) {
 	info, err := os.Stat(cfgPath)
 	var targetPath string
 	if err == nil && info.IsDir() {
-		if body.Name == "" || strings.Contains(body.Name, "/") || strings.Contains(body.Name, "..") {
+		if _, ok := safeBaseName(body.Name); !ok {
 			jsonError(w, "invalid file name", http.StatusBadRequest)
 			return
 		}
@@ -265,7 +265,7 @@ func (a *App) configsWriteHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		targetPath = cfgPath
 	}
-	if err := a.createFileBak(targetPath, body.Name); err != nil {
+	if err := a.createFileBak(targetPath, filepath.Base(targetPath)); err != nil {
 		a.failuref("backup", "pre-write backup of %s failed: %v", targetPath, err)
 		jsonError(w, "backup failed, nothing was written: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -944,22 +944,41 @@ func (a *App) backupDir() string {
 	return filepath.Join(a.cfg.BackupDir, "backups")
 }
 
+func safeBaseName(name string) (string, bool) {
+	if name == "" || name == "." || name == ".." {
+		return "", false
+	}
+	if strings.ContainsAny(name, "/\\\x00") || strings.Contains(name, "..") {
+		return "", false
+	}
+	if filepath.Base(name) != name {
+		return "", false
+	}
+	return name, true
+}
+
 func (a *App) createFileBak(targetPath, name string) error {
 	data, err := os.ReadFile(targetPath)
 	if err != nil {
 		return nil
 	}
-	dir := a.backupDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
 	base := name
 	if base == "" {
 		base = filepath.Base(targetPath)
 	}
+	if _, ok := safeBaseName(base); !ok {
+		return fmt.Errorf("unsafe backup name %q", base)
+	}
+	dir := a.backupDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	ts := time.Now().UTC().Format("20060102_150405")
-	bakName := base + "." + ts + ".bak"
-	if err := os.WriteFile(filepath.Join(dir, bakName), data, 0o644); err != nil {
+	dest := filepath.Join(dir, base+"."+ts+".bak")
+	if rel, err := filepath.Rel(dir, dest); err != nil || strings.ContainsRune(rel, filepath.Separator) {
+		return fmt.Errorf("unsafe backup name %q", base)
+	}
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
 		return err
 	}
 	a.pruneBackups(base)
@@ -1092,7 +1111,7 @@ func (a *App) createBackup() ([]string, error) {
 
 func (a *App) restoreHandler(w http.ResponseWriter, r *http.Request) {
 	filename := strings.TrimPrefix(r.URL.Path, "/api/restore/")
-	if strings.Contains(filename, "/") || strings.Contains(filename, "..") || !strings.HasSuffix(filename, ".bak") {
+	if _, ok := safeBaseName(filename); !ok || !strings.HasSuffix(filename, ".bak") {
 		jsonError(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
@@ -1186,7 +1205,7 @@ func (a *App) restoreCertStore(w http.ResponseWriter, r *http.Request, path stri
 
 func (a *App) backupDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	filename := strings.TrimPrefix(r.URL.Path, "/api/backup/delete/")
-	if strings.Contains(filename, "/") || strings.Contains(filename, "..") || !strings.HasSuffix(filename, ".bak") {
+	if _, ok := safeBaseName(filename); !ok || !strings.HasSuffix(filename, ".bak") {
 		jsonError(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
@@ -1785,7 +1804,7 @@ func (a *App) routeRawGetHandler(w http.ResponseWriter, r *http.Request, routeID
 
 	var scanPaths []string
 	if cf != "" {
-		if strings.Contains(cf, "/") || strings.Contains(cf, "..") {
+		if _, ok := safeBaseName(cf); !ok {
 			jsonError(w, "invalid config file", http.StatusBadRequest)
 			return
 		}
@@ -1860,7 +1879,7 @@ func (a *App) routeRawSaveHandler(w http.ResponseWriter, r *http.Request, routeI
 
 	var targetPath string
 	if cf != "" {
-		if strings.Contains(cf, "/") || strings.Contains(cf, "..") {
+		if _, ok := safeBaseName(cf); !ok {
 			jsonError(w, "invalid config file", http.StatusBadRequest)
 			return
 		}
@@ -1976,16 +1995,21 @@ func (a *App) routeRawSaveHandler(w http.ResponseWriter, r *http.Request, routeI
 }
 
 func (a *App) logsHandler(w http.ResponseWriter, r *http.Request) {
-	if a.cfg.AccessLogPath == "" {
-		jsonOK(w, map[string]any{"error": "ACCESS_LOG_PATH not configured", "lines": []any{}})
-		return
-	}
 	linesReq := 100
-	if v := r.URL.Query().Get("lines"); v != "" {
-		fmt.Sscanf(v, "%d", &linesReq)
+	if values, present := r.URL.Query()["lines"]; present {
+		n, err := strconv.Atoi(strings.TrimSpace(values[0]))
+		if err != nil || n < 1 {
+			jsonError(w, "Invalid lines parameter", http.StatusBadRequest)
+			return
+		}
+		linesReq = n
 		if linesReq > 1000 {
 			linesReq = 1000
 		}
+	}
+	if a.cfg.AccessLogPath == "" {
+		jsonOK(w, map[string]any{"error": "ACCESS_LOG_PATH not configured", "lines": []any{}})
+		return
 	}
 	f, err := os.Open(a.cfg.AccessLogPath)
 	if err != nil {

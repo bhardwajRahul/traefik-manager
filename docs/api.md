@@ -497,6 +497,8 @@ Tail Traefik access logs. Requires an access log path, from `ACCESS_LOG_PATH` or
 |---|---|---|
 | `lines` | `100` | `1000` |
 
+`lines` must be a positive whole number, otherwise the request answers `400`.
+
 ```json
 { "lines": ["..."] }
 ```

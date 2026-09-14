@@ -3855,9 +3855,12 @@ def api_certs():
 @login_required
 def api_logs():
     try:
-        lines_req = min(int(request.args.get('lines', 100)), 1000)
+        lines_req = int(request.args.get('lines', 100))
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid lines parameter'}), 400
+    if lines_req < 1:
+        return jsonify({'error': 'Invalid lines parameter'}), 400
+    lines_req = min(lines_req, 1000)
     log_path = _readable_config_path(_get_access_log_path())
     if not log_path or not os.path.exists(log_path):
         return jsonify({'error': 'Access log not found. Set ACCESS_LOG_PATH env var or configure the path in Settings.', 'lines': []})

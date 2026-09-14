@@ -33,7 +33,7 @@ TM handles authentication automatically when proxying calls through `/api/agents
 | GET | `/api/traefik/middlewares` | Middlewares across all protocols - returns `{"http":[...],"tcp":[...]}` |
 | GET | `/api/traefik/entrypoints` | Entrypoints |
 | GET | `/api/traefik/version` | Traefik version |
-| GET | `/api/traefik/logs` | Last N access log lines (requires `ACCESS_LOG_PATH`) - `?lines=100`, capped at 1000 |
+| GET | `/api/traefik/logs` | Last N access log lines (requires `ACCESS_LOG_PATH`) - `?lines=100`, a positive whole number capped at 1000 |
 | GET | `/api/traefik/certs/status` | Whether this agent can remove certificates: `available`, `writable`, `restart_method`, `reason`, `paths` |
 | POST | `/api/traefik/certs/delete` | Remove entries from `acme.json` and restart Traefik - body: `{"certs": [{"resolver": "...", "main": "..."}]}`. Refused unless the mount is writable and `RESTART_METHOD` is set |
 | GET | `/api/traefik/certs` | Certificates from acme.json (requires `ACME_JSON_PATH`) |
