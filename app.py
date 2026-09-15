@@ -3783,7 +3783,7 @@ def _acme_certs_from_paths(acme_paths):
                                   'sans': domain.get('sans', []) or [], 'not_after': not_after,
                                   'source': os.path.basename(acme_path)})
         except PermissionError:
-            errors.append(f'Permission denied reading {acme_path}. Run: chmod o+r {acme_path}')
+            errors.append(f'Permission denied reading {acme_path}. Run Traefik Manager as the user that owns it, do not chmod it.')
         except Exception as e:
             logger.exception("Error reading acme.json")
             errors.append(f'{os.path.basename(acme_path)}: {e}')

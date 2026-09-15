@@ -1758,6 +1758,10 @@ func (a *App) certsHandler(w http.ResponseWriter, r *http.Request) {
 	for _, path := range paths {
 		source := filepath.Base(path)
 		data, err := os.ReadFile(path)
+		if os.IsPermission(err) {
+			errs = append(errs, "Permission denied reading "+path+". Run the agent as the user that owns it, do not chmod it.")
+			continue
+		}
 		if err != nil {
 			errs = append(errs, "acme.json not found at "+path)
 			continue
