@@ -1,11 +1,11 @@
 import os
 import secrets
-import threading
 import time
 from functools import wraps
 
 from flask import abort, redirect, request, session, url_for
 
+from core import rate_store as rate_store_mod
 from core import settings as settings_mod
 from core.env import logger
 
@@ -109,9 +109,12 @@ def _check_inactivity():
 
 OTP_MAX_ATTEMPTS = 5
 OTP_PENDING_SECONDS = 600
-_OTP_TRACK_CAP = 10000
-_otp_attempts = {}
-_otp_lock = threading.Lock()
+_OTP_PREFIX = 'otp-attempts/'
+_otp_store = rate_store_mod.SharedStorage()
+
+
+def _otp_key(nonce) -> str:
+    return _OTP_PREFIX + str(nonce or '')
 
 
 def start_otp_attempt():
@@ -125,35 +128,21 @@ def otp_attempt_expired() -> bool:
         return True
     if time.time() - started > OTP_PENDING_SECONDS:
         return True
-    with _otp_lock:
-        return _otp_attempts.get(session['otp_nonce'], (0, 0))[0] >= OTP_MAX_ATTEMPTS
+    return _otp_store.get(_otp_key(session['otp_nonce'])) >= OTP_MAX_ATTEMPTS
 
 
 def record_otp_failure() -> int:
-    nonce = session.get('otp_nonce') or ''
-    now = time.time()
-    with _otp_lock:
-        if len(_otp_attempts) >= _OTP_TRACK_CAP:
-            for key, (_, first) in list(_otp_attempts.items()):
-                if now - first > OTP_PENDING_SECONDS:
-                    del _otp_attempts[key]
-            while len(_otp_attempts) >= _OTP_TRACK_CAP:
-                del _otp_attempts[next(iter(_otp_attempts))]
-        count, first = _otp_attempts.get(nonce, (0, now))
-        _otp_attempts[nonce] = (count + 1, first)
-        return count + 1
+    return _otp_store.incr(_otp_key(session.get('otp_nonce')), OTP_PENDING_SECONDS)
 
 
 def forget_otp_attempt():
     nonce = session.get('otp_nonce')
     if nonce:
-        with _otp_lock:
-            _otp_attempts.pop(nonce, None)
+        _otp_store.clear(_otp_key(nonce))
 
 
 def reset_otp_attempts():
-    with _otp_lock:
-        _otp_attempts.clear()
+    _otp_store.clear_prefix(_OTP_PREFIX)
 
 
 def _check_api_key() -> bool:

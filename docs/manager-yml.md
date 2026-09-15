@@ -19,6 +19,7 @@ TM stores some data in separate files alongside `manager.yml` in the same config
 | `notifications.yml.lock`    | Empty lock file that keeps the workers from overwriting each other's notifications. Safe to delete while TM is stopped          |
 | `notifications.yml.next_id` | The next notification id, so ids are never reused after a clear. Safe to delete while TM is stopped                             |
 | `notification_queue.json`   | What a digest or quiet-hours window is holding, up to 500 per channel. Safe to delete while TM is stopped                        |
+| `.rate_limits.json`         | Rate limit and wrong two-factor code counts shared by the workers, with its `.lock` file. Safe to delete while TM is stopped     |
 | `dashboard.yml`             | Dashboard custom groups and per-card overrides, kept per server                                                                 |
 | `.secret_key`, `.otp_key`   | Auto-generated session key and the Fernet key for every encrypted field below. Lose `.otp_key` and those secrets are unreadable |
 

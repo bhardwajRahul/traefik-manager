@@ -346,7 +346,8 @@ INACTIVITY_TIMEOUT = _auth.INACTIVITY_TIMEOUT
 
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-limiter = Limiter(get_remote_address, app=app, default_limits=[], storage_uri="memory://")
+from core import rate_store as _rate_store
+limiter = Limiter(get_remote_address, app=app, default_limits=[], storage_uri=_rate_store.SCHEME)
 
 
 def _failed_sign_in(response):
