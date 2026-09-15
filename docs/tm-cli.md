@@ -144,10 +144,13 @@ Your base domain and subdomains for:
 | Access logs | Yes | Logs tab in Traefik Manager |
 | SSL certs (`acme.json`) | Yes | Certs tab in Traefik Manager |
 | Traefik static config (`traefik.yml`) | No | Plugins tab + Static Config editor |
+| Certificate removal | No | Mounts `acme.json` read-write so the Certs tab can remove certificates. Asked when certs are mounted |
 
 **Docker network** - network name (default: `traefik-net`) and Traefik internal API port (default: `8080`)
 
 **Static config editor** - enabling the static config mount also asks which restart method to use (socket proxy, poison pill, or direct socket). `tm` then writes every required compose addition - socket proxy service, shared signal volume, Traefik healthcheck, env vars on TM - so the editor works out of the box. It covers entrypoints, certificate resolvers, providers, plugins, API, logging, observability and system settings, plus a raw YAML editor for anything else. See [Static Config Editor](static.md).
+
+**Certificate removal** - asks for the same restart method when the static config editor is off. See [Removing a certificate](tab-certs.md#removing-a-certificate).
 
 For an existing install that skipped it:
 
@@ -251,8 +254,9 @@ Numbered sections (General, Network, Access, Dynamic config, Optional mounts) en
 | Access logs | Yes | Path to Traefik access log (default: `/var/log/traefik/access.log`) |
 | SSL certs (`acme.json`) | Yes | Path to `acme.json` (default: `/etc/traefik/acme.json`) |
 | Traefik static config | No | Path to `traefik.yml` (default: `/etc/traefik/traefik.yml`) |
+| Certificate removal | No | Asked when certs are mounted. Mounts `acme.json` read-write |
 
-**Static config editor** - mounting the static config also asks for the restart method (socket proxy, poison pill, or direct socket) and the Traefik container name (default: `traefik`).
+**Static config editor** - mounting the static config or allowing certificate removal also asks for the restart method (socket proxy, poison pill, or direct socket) and the Traefik container name (default: `traefik`).
 
 To add static config support later, either run `tm reconfigure --section mounts` (regenerates the compose file, preserving config and backups) or follow [Enable static config editor](static-enable.md).
 
@@ -331,6 +335,8 @@ Numbered sections (General, Service user, Dynamic config, Optional mounts) end w
 | Linux service (systemd) | Poison pill only. `tm` installs a `traefik-restart.path` unit that restarts your Traefik service (default name: `traefik`) when the signal file appears. |
 
 Poison pill asks for the signal file path (default: `/var/lib/traefik-manager/signals/restart.sig`).
+
+Certificate removal is not offered in this mode. The service runs as a different user than Traefik, and Traefik refuses an `acme.json` that another user can write. Use a Docker mode for it.
 
 To add static config support later, either run `tm reconfigure --section mounts` (regenerates the systemd unit and restarts the service) or follow [Enable static config editor](static-enable.md) to add the env vars by hand.
 
@@ -424,9 +430,10 @@ Type a section number to re-configure it, then press Enter to return to the revi
 - Mount ACME / certs (default: `/etc/traefik/acme.json`)
 - Mount access logs (default: `/var/log/traefik/access.log`)
 - Mount plugins directory (default: `/etc/traefik/plugins`)
+- Allow certificate removal - asked when acme.json is mounted, or TLS is on for Agent + Traefik. Mounts it read-write
 
 **Restart method (section 5)**
-- None, socket proxy, poison pill, or direct Docker socket
+- None, socket proxy, poison pill, or direct Docker socket. None is not offered when certificate removal is on
 
 **CrowdSec (section 6)**
 
