@@ -79,11 +79,7 @@ editable directly from the route form.
 
 ### The Certs tab says permission denied on acme.json
 
-Traefik Manager only reads `acme.json` unless you switch on certificate removal, so mount it `:ro` unless you want that. Under Docker the container runs as root, so Traefik's required mode 600 reads fine and a permission error there means you gave the container a non-root `user:`. On a native Linux install the `traefik-manager` service user needs read access:
-
-```bash
-chmod o+r /etc/traefik/acme.json
-```
+Traefik Manager only reads `acme.json` unless you switch on certificate removal, so mount it `:ro` unless you want that. Under Docker the container runs as root, so Traefik's required mode 600 reads fine and a permission error there means you gave the container a non-root `user:`. On a native Linux install, run Traefik Manager as the user that owns `acme.json`. Do not `chmod o+r` it or add an ACL entry: Traefik refuses the file at its next start. See [Linux](linux.md#acme-json).
 
 Traefik writes one storage file per resolver, so `ACME_JSON_PATH` also accepts a comma-separated list or a directory. See [Certs Tab](tab-certs.md#requirements).
 

@@ -83,7 +83,7 @@ chown traefik-manager: /etc/traefik /etc/traefik/dynamic.yml
 chown traefik-manager: /var/lib/traefik-manager /var/lib/traefik-manager/backups
 ```
 
-Read access is enough for the optional Certs and Logs files.
+Read access is enough for the optional Logs file. The Certs tab needs more, see [acme.json](#acme-json).
 
 **2. Create the service unit**
 
@@ -165,10 +165,9 @@ Environment=STATIC_CONFIG_PATH=/etc/traefik/traefik.yml
 Environment=ACCESS_LOG_PATH=/var/log/traefik/access.log
 ```
 
-The `traefik-manager` user needs read access to each file:
+The `traefik-manager` user needs read access to the Plugins and Logs files:
 
 ```bash
-chmod o+r /etc/traefik/acme.json
 chmod o+r /etc/traefik/traefik.yml   # write access instead, for the Static Config editor
 chmod o+r /var/log/traefik/access.log
 ```
@@ -178,6 +177,17 @@ Access logs are often owned by `root` or an `adm`/`syslog` group. Where `chmod o
 ```bash
 usermod -aG adm traefik-manager
 ```
+
+### acme.json
+
+Traefik refuses an `acme.json` with any group or other permission and stops loading certificates at its next start. `chmod o+r` sets one, and so does `setfacl`, because the ACL mask shows as the group bits. Keep the file at `600` and run Traefik Manager as the user that owns it.
+
+| Certs tab | Needs |
+|---|---|
+| View certificates | `User=` in the Traefik Manager unit set to the owner of `acme.json` |
+| Remove certificates | The same, plus a [restart method](#static-config-editor) |
+
+Then `chown` the paths from [Systemd service](#systemd-service) to that user instead of `traefik-manager`.
 
 ---
 

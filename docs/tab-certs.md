@@ -9,7 +9,7 @@ The **Certs** tab shows TLS certificates managed by Traefik, read from two sourc
 
 A summary strip counts your certificates, how many expire within 7 and within 30 days, and when the next one expires. Each card below shows the main domain with the issuing resolver underneath (`file` for PEM certs), the first two additional SANs with a copy button each (the rest behind a `+N more`), and the expiry date with the days remaining coloured green, amber under 30 days, and red under 7.
 
-Certificates are **read-only** - they are issued and renewed automatically by Traefik. To revoke or force a renewal, do so via your Traefik configuration.
+Certificates are **read-only** unless you allow [removing a certificate](#removing-a-certificate). Traefik issues and renews them. To revoke or force a renewal, do so via your Traefik configuration.
 
 ## Certificates nothing uses
 
@@ -50,11 +50,7 @@ volumes:
 Environment=ACME_JSON_PATH=/etc/traefik/acme.json
 ```
 
-The `traefik-manager` service user needs write access to the file:
-
-```bash
-setfacl -m u:traefik-manager:rw /etc/traefik/acme.json
-```
+Traefik Manager has to run as the user that owns `acme.json`. Do not use `setfacl` or `chmod`: any group or other permission, an ACL entry included, makes Traefik refuse the file. See [Linux](linux.md#acme-json).
 :::
 
 ### 2. Set a restart method
@@ -185,6 +181,8 @@ volumes:
 ```ini
 Environment=ACME_JSON_PATH=/etc/traefik/acme.json
 ```
+
+Run Traefik Manager as the user that owns `acme.json`, see [Linux](linux.md#acme-json).
 :::
 
 #### Several storage files
