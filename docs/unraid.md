@@ -1,23 +1,32 @@
 # Running on Unraid
 
-Traefik Manager ships an Unraid template, kept in [chr0nzz/unraid-templates](https://github.com/chr0nzz/unraid-templates). It is not in Community Applications yet, so install it as a user template.
+Traefik Manager and its agent are both in Community Applications. The templates are kept in [chr0nzz/unraid-templates](https://github.com/chr0nzz/unraid-templates).
 
-::: warning Template Repositories is gone
-Older guides tell you to paste a repository URL into **Apps - Settings - Template Repositories**. Unraid removed that field in favour of Community Applications, so there is nowhere to paste it. Use the steps below instead.
-:::
+| App | Install it when |
+|---|---|
+| [traefik-manager](https://ca.unraid.net/apps/traefik-manager-07006dq0obycuq) | Traefik runs on this Unraid server and you want to manage it here |
+| [traefik-manager-agent](https://ca.unraid.net/apps/traefik-manager-agent-0hwaq5u1sy2tzy) | Traefik runs on this server but you manage it from a Traefik Manager on another machine. See [Agent](agent.md) |
 
 ---
 
-## Install the template
+## Install from Community Applications
 
-Open a terminal on your Unraid server and run:
+1. Open the **Apps** tab on your Unraid server
+2. Search for **traefik-manager** and click **Install**
+3. Fill in the fields below and click **Apply**
+
+For the agent, search for **traefik-manager-agent** instead. It has no UI: add the server in your Traefik Manager under **Settings → Agents** to generate an API key, then paste the key into the template.
+
+### Manual install
+
+Without the Apps tab, install the template by hand. Open a terminal on your Unraid server and run:
 
 ```bash
 wget -O /boot/config/plugins/dockerMan/templates-user/my-traefik-manager.xml \
   https://raw.githubusercontent.com/chr0nzz/unraid-templates/main/templates/traefik-manager.xml
 ```
 
-Then:
+For the agent, use `my-traefik-manager-agent.xml` and `templates/traefik-manager-agent.xml`. Then:
 
 1. Open the **Docker** tab and click **Add Container**
 2. Pick **traefik-manager** from the **Template** dropdown, under *User templates*
@@ -184,4 +193,4 @@ Traefik Manager needs to reach the Traefik API. The simplest way on Unraid is to
 
 ## Updating
 
-Click **Check for Updates** in the Unraid Docker tab. That updates the image, not the template: to pick up new fields added to the template, re-run the `wget` above and the Docker tab will offer them on the next edit. Traefik Manager follows semantic versioning - patch releases are safe to apply immediately. Check the [release notes](https://github.com/chr0nzz/traefik-manager/releases) before applying minor or major updates.
+Click **Check for Updates** in the Unraid Docker tab. That updates the image, not the template. If you used the manual install, re-run the `wget` above to pick up new fields added to the template, and the Docker tab will offer them on the next edit. Traefik Manager follows semantic versioning - patch releases are safe to apply immediately. Check the [release notes](https://github.com/chr0nzz/traefik-manager/releases) before applying minor or major updates.
