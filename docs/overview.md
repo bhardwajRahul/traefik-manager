@@ -365,7 +365,7 @@ Browse routes, middlewares, and services. Enable/disable routes. Add and edit wi
 | Agent | Go 1.25 · Alpine Linux (TMA - remote agent daemon) |
 | Config | ruamel.yaml (preserves comments and Go templates) |
 | Auth | bcrypt · pyotp (TOTP) · Flask sessions · CSRF · Flask-Limiter · Fernet |
-| Frontend | Vanilla JS · Tailwind CSS 3.4 · Phosphor Icons |
+| Frontend | Vanilla JS · Tailwind CSS 3.4 · Phosphor Icons · Twemoji country flags (CC-BY 4.0) |
 | Editor | Monaco Editor 0.52 (VS Code engine) |
 | Route Map | dagre 3.1 (graph layout) |
 | Geolocation | maxminddb · DB-IP Lite (local lookups, no external calls) |

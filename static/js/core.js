@@ -1017,7 +1017,7 @@ async function geoLookup(ips) {
 
 function _flagEmoji(cc) {
     if (!cc || cc.length !== 2) return '';
-    try { return String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1E6 + c.charCodeAt(0) - 65)); }
+    try { return '<span class="tm-flag">' + String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1E6 + c.charCodeAt(0) - 65)) + '</span>'; }
     catch(_) { return ''; }
 }
 

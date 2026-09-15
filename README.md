@@ -175,7 +175,7 @@ Native Android, rewritten in Kotlin and Jetpack Compose for v2. Needs Traefik Ma
 | Agent | Go 1.25 · Alpine |
 | Config | ruamel.yaml, preserving comments and Go templates |
 | Auth | bcrypt · pyotp · CSRF · Flask-Limiter · Fernet |
-| Frontend | Vanilla JS · Tailwind 3.4 · Phosphor Icons · Monaco |
+| Frontend | Vanilla JS · Tailwind 3.4 · Phosphor Icons · Monaco · Twemoji country flags (CC-BY 4.0) |
 | Geolocation | maxminddb · DB-IP Lite, local lookups only |
 | Tests | pytest · ruff · `go test`, on every pull request |
 

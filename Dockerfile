@@ -74,6 +74,12 @@ RUN curl -sL "https://registry.npmjs.org/@fontsource/jetbrains-mono/-/jetbrains-
     && cp /tmp/package/files/* /app/static/vendor/fonts/jetbrains-mono/ \
     && rm -rf /tmp/package
 
+RUN curl -sL "https://registry.npmjs.org/country-flag-emoji-polyfill/-/country-flag-emoji-polyfill-0.1.10.tgz" \
+    | tar -xz -C /tmp \
+    && cp /tmp/package/dist/TwemojiCountryFlags.woff2 /app/static/vendor/fonts/ \
+    && cp /tmp/package/LICENSE.md /app/static/vendor/fonts/TwemojiCountryFlags-LICENSE.md \
+    && rm -rf /tmp/package
+
 RUN tailwindcss -c /app/tailwind.config.js \
     -i /app/static/css/tailwind.input.css \
     -o /app/static/css/tailwind.css --minify
