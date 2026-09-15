@@ -56,8 +56,8 @@ BACKUP_DIR=/var/lib/traefik-manager/backups \
 SETTINGS_PATH=/var/lib/traefik-manager/manager.yml \
 COOKIE_SECURE=false \
 /opt/traefik-manager/venv/bin/gunicorn \
+  --config /opt/traefik-manager/gunicorn.conf.py \
   --bind 0.0.0.0:5000 \
-  --workers 1 \
   --chdir /opt/traefik-manager \
   app:app
 ```
@@ -100,9 +100,8 @@ User=traefik-manager
 WorkingDirectory=/opt/traefik-manager
 Environment=HOME=/opt/traefik-manager
 ExecStart=/opt/traefik-manager/venv/bin/gunicorn \
+    --config /opt/traefik-manager/gunicorn.conf.py \
     --bind 0.0.0.0:5000 \
-    --workers 1 \
-    --log-level info \
     app:app
 
 # Paths

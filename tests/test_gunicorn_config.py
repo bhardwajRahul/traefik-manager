@@ -36,6 +36,14 @@ def test_the_image_uses_the_config_file():
         'the arbiter would hold its lock forever')
 
 
+def test_the_linux_service_uses_the_config_file():
+    doc = _read('docs', 'linux.md')
+    assert '--workers' not in doc and '--log-level' not in doc, \
+        'a flag pins the value and hides WEB_CONCURRENCY and GUNICORN_LOG_LEVEL'
+    assert doc.count('--config /opt/traefik-manager/gunicorn.conf.py') == 2, \
+        'gunicorn only finds the file on its own when started from the install directory'
+
+
 def test_requests_are_served_in_parallel():
     conf = _load()
     assert conf['worker_class'] == 'gthread', \
