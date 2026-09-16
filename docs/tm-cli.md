@@ -57,7 +57,7 @@ What would you like to install?
   3) Traefik Manager Agent
 ```
 
-**Traefik Manager only** then asks how to deploy it:
+**Traefik + Traefik Manager** and **Traefik Manager only** then both ask how to deploy:
 
 ```
 Deployment method
@@ -65,7 +65,15 @@ Deployment method
   2) Linux service (systemd)
 ```
 
-`tm install --mode <mode>` skips the menus: `full`, `tm-docker`, `tm-native`, `agent-docker`, `agent-docker-traefik`, `agent-binary`, or `agent` to pick only the agent method.
+| Answer | Mode | Documented as |
+|---|---|---|
+| Full stack, Docker | `full` | [Mode 1](#mode-1-traefik-traefik-manager-full-stack) |
+| Full stack, Linux service | `full-native` | [Mode 2](#mode-2-traefik-traefik-manager-linux-services) |
+| Traefik Manager only, Docker | `tm-docker` | [Mode 3](#mode-3-traefik-manager-only-docker) |
+| Traefik Manager only, Linux service | `tm-native` | [Mode 4](#mode-4-traefik-manager-only-linux-service) |
+| Traefik Manager Agent | `agent-docker`, `agent-docker-traefik`, `agent-binary` | [Mode 5](#mode-5-traefik-manager-agent) |
+
+`tm install --mode <mode>` skips the menus, taking any mode above, or `agent` to pick only the agent method.
 
 ---
 
@@ -96,10 +104,10 @@ The setup runs through numbered sections (General, Deployment type, Domain, TLS 
    8  Docker network      traefik-net  api:8080
   ────────────────────────────────────────────────────────
 
-  Edit a section (1-8) or Enter to install:
+  Edit a section, or Continue
 ```
 
-Type a section number to re-configure it, then press Enter with no number to install. Nothing is written to disk until you confirm.
+Pick a section to answer it again, or Continue to install. Nothing is written to disk until you continue.
 
 ### What the wizard configures
 
@@ -246,7 +254,127 @@ Or directly with Compose from `~/traefik-stack`: `docker compose logs -f traefik
 
 ---
 
-## Mode 2 - Traefik Manager only (Docker)
+## Mode 2 - Traefik + Traefik Manager (Linux services)
+
+Installs Traefik and Traefik Manager as systemd services on the host. No Docker anywhere. Use this on a server that does not run containers, or where Traefik should be an ordinary system service.
+
+### Prerequisites
+
+- Python 3.11 or newer
+- `git`, `curl`
+- `systemd`
+- amd64, arm64 or armv7. `tm` downloads the Traefik release for that architecture
+- `sudo`, for the units, the service user, `/usr/local/bin/traefik`, `/etc/traefik`, `/var/lib/traefik` and `/var/log/traefik`
+
+`tm` refuses to install when the host already has a `traefik.service` it did not write. Install Traefik Manager beside it with `--mode tm-native` instead.
+
+### Sections and review screen
+
+Seven sections: General, Deployment type, TLS / Certificates, Domain, Dynamic config, Static config editor, CrowdSec.
+
+```
+  Review configuration
+  ────────────────────────────────────────────────────────
+   1  General              /opt/traefik-manager  data:/var/lib/traefik-manager  tm::5000  api::8080
+   2  Deployment type      external (internet-facing)
+   3  TLS / Certificates   Let's Encrypt HTTP challenge  you@example.com
+   4  Domain               example.com  dash:traefik.example.com
+   5  Dynamic config       Single file
+   6  Static config editor static editor on (restart:poison-pill)  cert removal on
+   7  CrowdSec             install (CrowdSec package)  bouncer plugin
+  ────────────────────────────────────────────────────────
+
+  Edit a section, or Continue
+```
+
+Nothing is written to disk until you pick Continue.
+
+### What the wizard configures
+
+| Section | Asks |
+|---|---|
+| General | Install directory (default `/opt/traefik-manager`), data directory (default `/var/lib/traefik-manager`), Traefik Manager port (default `5000`), Traefik internal API port (default `8080`) |
+| Deployment type | External (internet-facing) or internal only (LAN, VPN, Tailscale) |
+| TLS / Certificates | Same choices as mode 1: Let's Encrypt HTTP or DNS challenge, or no TLS |
+| Domain | Optional. Leave it empty for no dashboard route. Otherwise the dashboard subdomain (default `traefik.<domain>`) and whether to serve the Traefik dashboard UI |
+| Dynamic config | Single file (`/etc/traefik/dynamic/dynamic.yml`) or directory (`/etc/traefik/dynamic`). The paths are fixed |
+| Static config editor | Whether Traefik Manager may edit `/etc/traefik/traefik.yml`. With TLS on it also offers certificate removal |
+| CrowdSec | Install the CrowdSec package on this server, or connect to an existing instance |
+
+There is no restart method question. Either answer in the Static config editor section installs a `traefik-restart.path` watcher: Traefik Manager writes `/var/lib/traefik-manager/signals/restart.sig` and the watcher restarts Traefik. No Docker socket is involved.
+
+Unlike mode 1, Traefik Manager itself gets no hostname and no Traefik route. Reach it at `http://<server-ip>:5000`.
+
+### What tm installs
+
+- Downloads the latest Traefik release for this architecture, verifies its SHA-256, and installs `/usr/local/bin/traefik`. The version is recorded so `tm update` can compare
+- Creates the `traefik-manager` system user. Traefik and Traefik Manager both run as it, which is what makes certificate removal work here: `acme.json` stays mode 600 and is owned by the user that writes it
+- Writes `traefik.service` (with a systemd watchdog) and `traefik-manager.service`, plus `traefik-restart.path` and `traefik-restart.service` when a restart is needed
+- Adds `/etc/logrotate.d/traefik`, rotating the access log daily and keeping 14
+
+### Directory structure
+
+```
+/usr/local/bin/traefik         (binary, .prev kept after an update)
+/etc/traefik/
+- traefik.yml                  (static config)
+- dynamic/
+  - dynamic.yml                (single file layout)
+  - *.yml                      (directory layout)
+/var/lib/traefik/
+- acme.json                    (certificates, mode 600)
+- plugins-storage/
+/var/log/traefik/
+- access.log
+/opt/traefik-manager/          (the app, a git clone and its venv)
+/var/lib/traefik-manager/
+- manager.yml
+- backups/
+- signals/
+/etc/traefik-manager/
+- env                          (secrets, mode 600)
+- tm-state.yml                 (tm's record of the install)
+/etc/systemd/system/
+- traefik.service
+- traefik-manager.service
+- traefik-restart.path
+- traefik-restart.service
+```
+
+### Useful commands
+
+```bash
+tm status
+tm logs
+tm logs traefik
+tm doctor
+tm password
+tm restart
+```
+
+`tm restart` restarts both services; `tm restart traefik` takes one. With systemd directly: `sudo systemctl status traefik traefik-manager`, `sudo journalctl -u traefik-manager -f`.
+
+### Updating
+
+`tm update` pulls the app as the `traefik-manager` user, reinstalls dependencies, rebuilds the assets and restarts the service. It then checks for a newer Traefik release, keeps the old binary as `traefik.prev`, and rolls back to it if Traefik stops answering `/ping` within 30 seconds.
+
+### Uninstalling
+
+`tm uninstall` stops and removes the units, the Traefik binary and the install directory. It keeps `/etc/traefik`, `/var/lib/traefik`, `/var/log/traefik` and the data directory, so routes, certificates and logs survive. `tm uninstall --purge` removes those too and deletes the service user. An installed CrowdSec package is always left in place.
+
+### What this mode does not do
+
+| Not available | Instead |
+|---|---|
+| Traefik Manager behind Traefik with TLS | Reach it on its port, or add a route yourself |
+| Docker provider, container label routing | The file provider only |
+| A choice of restart method | Always the signal file watcher |
+| Configurable config, log and certificate paths | The paths above are fixed |
+| Several installs on one host | One, at fixed unit names and a fixed state file |
+
+---
+
+## Mode 3 - Traefik Manager only (Docker)
 
 Installs just Traefik Manager as a Docker container. Use this when Traefik is already running on your server.
 
@@ -255,7 +383,7 @@ Installs just Traefik Manager as a Docker container. Use this when Traefik is al
 Numbered sections (General, Network, Access, Dynamic config, Optional mounts) end with the same review table as the other modes:
 
 ```
-  Edit a section (1-5) or Enter to install:
+  Edit a section, or Continue
 ```
 
 ### What the wizard configures
@@ -326,7 +454,7 @@ tm password
 
 ---
 
-## Mode 3 - Traefik Manager only (Linux service)
+## Mode 4 - Traefik Manager only (Linux service)
 
 Installs Traefik Manager as a native systemd service. No Docker required. Use this when you run Traefik natively or prefer not to use containers.
 
@@ -341,7 +469,7 @@ Installs Traefik Manager as a native systemd service. No Docker required. Use th
 Numbered sections (General, Service user, Dynamic config, Optional mounts) end with the same review table as the other modes:
 
 ```
-  Edit a section (1-4) or Enter to install:
+  Edit a section, or Continue
 ```
 
 ### What the wizard configures
@@ -411,7 +539,7 @@ Or with systemd directly: `sudo systemctl status traefik-manager`, `sudo journal
 
 ---
 
-## Mode 4 - Traefik Manager Agent
+## Mode 5 - Traefik Manager Agent
 
 Installs the [TMA agent](agent.md) on a remote server so a central Traefik Manager can manage it. This mode does not install TM itself.
 
@@ -449,10 +577,10 @@ tm install --mode agent-docker --api-key <key> --traefik-url http://traefik:8080
    8  Install location   /opt/traefik-manager-agent  :8090
   ────────────────────────────────────────────────────────
 
-  Edit a section (1-8) or Enter to install:
+  Edit a section, or Continue
 ```
 
-Type a section number to re-configure it, then press Enter to return to the review. Press Enter with no number to install. The binary method has no **Install location** section, so it shows 7.
+Pick a section to answer it again, or Continue to install. The binary method has no **Install location** section, so it shows 7.
 
 ### What the wizard asks
 
