@@ -164,9 +164,33 @@ For an existing install that skipped it:
 | Install as part of this stack | Adds a `crowdsec` service, generates a random bouncer API key, writes `crowdsec/acquis.yaml` pointing at the Traefik access log, and sets `CROWDSEC_LAPI_URL` + `CROWDSEC_API_KEY` on Traefik Manager. |
 | Connect to existing instance | Prompts for the LAPI URL and bouncer key of a CrowdSec instance you already run, plus optional machine credentials for alerts and unban. No new service is added. |
 
-Choosing the install option turns the access log mount on automatically - CrowdSec needs it.
+Choosing the install option turns the access log mount on automatically - CrowdSec needs it. Both options then ask for the alert limit (0 to 100000, default 500), which becomes `CROWDSEC_ALERT_LIMIT`.
 
 Once installed, enable the **CrowdSec** tab under **Settings → System Monitoring → Tab Visibility** to view active decisions, recent alerts, and unban IPs.
+
+### CrowdSec bouncer plugin
+
+CrowdSec on its own detects. The bouncer is what blocks. After the CrowdSec questions `tm` offers to install the [Traefik bouncer plugin](https://github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin):
+
+| What | Detail |
+|---|---|
+| Offered when | CrowdSec is set to install or connect, and `tm` can write `traefik.yml`: this mode and the agent with Traefik, or any other mode with the static config mount set |
+| Declares | `experimental.plugins.crowdsec`, module `github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin`, version `v1.7.1` |
+| Writes | A `crowdsec` middleware in your dynamic config: `crowdsec.yml` in a config directory, or inlined in a single-file layout |
+| Middleware holds | `CrowdsecMode: live`, the LAPI scheme and host, and the bouncer key in plain text. Keep that file with the rest of your Traefik config |
+| Backup | An existing `traefik.yml` is copied to `traefik.yml.tm.bak` before the plugin block is added |
+
+`tm` never attaches the middleware to a router. Nothing is blocked until you add it yourself:
+
+```yaml
+  middlewares:
+    - crowdsec@file
+```
+
+Two things worth knowing:
+
+- If the plugin is already declared in `traefik.yml` under another alias, `tm` reuses it and changes nothing.
+- On an install where `tm` did not write `traefik.yml`, the plugin trusts the forwarded headers your entrypoints already trust. When none are set, the bouncer sees the address Traefik connects from and bans that instead of the real client. Set `forwardedHeaders.trustedIPs` on the entrypoint, then run `tm reconfigure`.
 
 ### Directory structure
 
@@ -260,7 +284,16 @@ Numbered sections (General, Network, Access, Dynamic config, Optional mounts) en
 
 To add static config support later, either run `tm reconfigure --section mounts` (regenerates the compose file, preserving config and backups) or follow [Enable static config editor](static-enable.md).
 
-This mode does not ask about CrowdSec. Connect it after install under **Settings → System Monitoring → CrowdSec**, or set `CROWDSEC_LAPI_URL` and `CROWDSEC_API_KEY` in the compose file yourself.
+**CrowdSec IDS**
+
+| Option | What happens |
+|---|---|
+| Install alongside Traefik Manager (container) | Adds a `crowdsec` service, asks for the Traefik access log path and turns that mount on, generates a bouncer key, writes `crowdsec/acquis.yaml`, and sets `CROWDSEC_LAPI_URL` + `CROWDSEC_API_KEY` |
+| Connect to existing instance | Asks for the LAPI URL and bouncer key, plus optional machine credentials for alerts and unban |
+
+Both ask for the alert limit. The bouncer plugin is offered only when the static config mount is on, since the plugin is declared in `traefik.yml`. See [the bouncer plugin](#crowdsec-bouncer-plugin) under mode 1.
+
+To add CrowdSec to an existing install, run `tm add crowdsec`.
 
 ### Directory structure
 
@@ -340,7 +373,20 @@ Certificate removal is not offered in this mode. The service runs as a different
 
 To add static config support later, either run `tm reconfigure --section mounts` (regenerates the systemd unit and restarts the service) or follow [Enable static config editor](static-enable.md) to add the env vars by hand.
 
-This mode does not ask about CrowdSec. Connect it after install under **Settings → System Monitoring → CrowdSec**, or add `CROWDSEC_LAPI_URL` and `CROWDSEC_API_KEY` to the unit file (`sudo systemctl edit traefik-manager`).
+**CrowdSec IDS**
+
+| Option | What happens |
+|---|---|
+| Install on this server (CrowdSec package) | Installs the CrowdSec package (the distro package on Arch, the CrowdSec repo script elsewhere), enables `crowdsec.service`, installs the `crowdsecurity/traefik` collection, registers a `traefik-manager` bouncer and a machine, and writes `/etc/crowdsec/acquis.d/traefik.yaml` pointing at your access log |
+| Connect to existing instance | Asks for the LAPI URL and bouncer key, plus optional machine credentials for alerts and unban |
+
+Both ask for the alert limit. Credentials go to `/etc/traefik-manager/env` (mode 600), the rest into the unit as `Environment=`.
+
+The LAPI listens on `127.0.0.1:8080`. To move it, set `crowdsec.lapi_port` in an answers file: the wizard does not ask for it. `tm` then writes `/etc/crowdsec/config.yaml.local` and `/etc/crowdsec/local_api_credentials.yaml.local` with that port. It refuses a port already in use, or one that clashes with the Traefik Manager port.
+
+The bouncer plugin is offered only when the static config mount is on. In a single-file dynamic config `tm` does not write the middleware, because it did not create that file: it prints the YAML for you to paste. See [the bouncer plugin](#crowdsec-bouncer-plugin) under mode 1.
+
+`tm uninstall` removes the acquis file and leaves the CrowdSec package installed.
 
 `tm` clones the repository, creates a Python venv, installs dependencies, builds the vendor assets and CSS, writes the systemd unit, and enables the service. Its record of the install is `/etc/traefik-manager/tm-state.yml`.
 
@@ -440,8 +486,12 @@ Type a section number to re-configure it, then press Enter to return to the revi
 | Option | What it does |
 |---|---|
 | None | Skip CrowdSec |
-| Install alongside agent | Adds a `crowdsec` service, generates a random bouncer key, writes `crowdsec/acquis.yaml`. Requires the access log mount (prompts if not set). Docker installs only. |
-| Connect to existing | Enter LAPI URL and API key. |
+| Install alongside agent | Docker methods: adds a `crowdsec` service, generates a bouncer key, writes `crowdsec/acquis.yaml`. Binary method: installs the CrowdSec package, registers a `tma` bouncer, writes `/etc/crowdsec/acquis.d/traefik.yaml`. Requires the access log mount (prompts if not set) |
+| Connect to existing | Enter LAPI URL and API key |
+
+All three ask for the alert limit. Agents never get machine credentials, so alerts and unban stay with the Traefik Manager that owns them. On the binary method, `crowdsec.lapi_port` in an answers file moves the LAPI off `8080`, which matters when the agent port or the Traefik API port already uses it.
+
+The bouncer plugin is offered with the agent + Traefik method, or with any method where the static config mount is set. See [the bouncer plugin](#crowdsec-bouncer-plugin) under mode 1.
 
 **Git backup (section 7)** - repo URL, branch, username, token, auto-push toggle
 
