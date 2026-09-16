@@ -268,5 +268,15 @@ networks:
 ```
 
 ::: tip Automated setup
-The [tm CLI installer](tm-cli.md) can configure CrowdSec during installation. Installing CrowdSec as part of the stack generates the bouncer key (for decisions), registers a **machine**, and wires up `CROWDSEC_MACHINE_ID` / `CROWDSEC_MACHINE_PASSWORD` (for alerts and unban), so both views work out of the box. When connecting to an existing CrowdSec instance, the installer prompts for an optional machine ID and password. To add CrowdSec to an install that does not have it, run `tm add crowdsec`.
+The [tm CLI installer](tm-cli.md) can configure CrowdSec during installation, in every install mode. To add it to an install that does not have it, run `tm add crowdsec`.
+
+| Option | What you get |
+|---|---|
+| Install, Docker | A `crowdsec` service beside Traefik Manager, the bouncer key for decisions, a registered **machine** with `CROWDSEC_MACHINE_ID` / `CROWDSEC_MACHINE_PASSWORD` for alerts and unban, and `crowdsec/acquis.yaml` reading the access log |
+| Install, native | The CrowdSec package on the server, `crowdsec.service` enabled, the `crowdsecurity/traefik` collection, a registered bouncer and machine, and `/etc/crowdsec/acquis.d/traefik.yaml` |
+| Connect to existing | The LAPI URL and bouncer key, plus an optional machine ID and password |
+
+Every mode also asks for the [alert limit](#fetching). A native install listens on `127.0.0.1:8080`; set `crowdsec.lapi_port` in an answers file to move it.
+
+The installer can also add the [CrowdSec bouncer plugin](tm-cli.md#crowdsec-bouncer-plugin) to Traefik, which is what blocks the addresses this tab shows. It writes a `crowdsec@file` middleware, and you attach that middleware to your own routers.
 :::
