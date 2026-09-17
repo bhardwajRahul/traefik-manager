@@ -2,6 +2,7 @@ import ipaddress
 import logging
 import os
 import threading
+import time
 
 GITHUB_REPO = "chr0nzz/traefik-manager"
 APP_VERSION = "1.14.0"
@@ -152,6 +153,11 @@ else:
 CONFIG_PATH  = CONFIG_PATHS[0]
 MULTI_CONFIG = len(CONFIG_PATHS) > 1
 
+CONFIG_SCAN_TTL    = 2.0
+_config_scan_lock  = threading.Lock()
+_config_scan_at    = 0.0
+_config_scan_mtime = 0
+
 
 def _probe_writable(path: str) -> str:
     if os.path.isfile(path):
@@ -244,3 +250,48 @@ def register_config_path(path: str):
         CONFIG_PATH  = CONFIG_PATHS[0]
         MULTI_CONFIG = len(CONFIG_PATHS) > 1
         ALLOWED_FILE_PREFIXES = allowed_file_prefixes()
+
+
+def _apply_config_paths(paths):
+    global CONFIG_PATHS, CONFIG_PATH, MULTI_CONFIG, ALLOWED_FILE_PREFIXES
+    if paths == CONFIG_PATHS:
+        return CONFIG_PATHS
+    CONFIG_PATHS = paths
+    CONFIG_PATH  = CONFIG_PATHS[0]
+    MULTI_CONFIG = len(CONFIG_PATHS) > 1
+    ALLOWED_FILE_PREFIXES = allowed_file_prefixes()
+    return CONFIG_PATHS
+
+
+def _config_dir_mtime() -> int:
+    try:
+        return os.stat(ACTIVE_CONFIG_DIR).st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _scan_is_current(mtime: int) -> bool:
+    return mtime == _config_scan_mtime and time.monotonic() - _config_scan_at < CONFIG_SCAN_TTL
+
+
+def refresh_config_paths(force: bool = False):
+    global _config_scan_at, _config_scan_mtime
+    if not ACTIVE_CONFIG_DIR:
+        return CONFIG_PATHS
+    mtime = _config_dir_mtime()
+    if not force and _scan_is_current(mtime):
+        return CONFIG_PATHS
+    with _config_scan_lock:
+        if not force and _scan_is_current(mtime):
+            return CONFIG_PATHS
+        _config_scan_at    = time.monotonic()
+        _config_scan_mtime = mtime
+        try:
+            found = scan_config_dir(ACTIVE_CONFIG_DIR)
+        except OSError as e:
+            logger.warning(f"Could not rescan {ACTIVE_CONFIG_DIR}: {e}")
+            return CONFIG_PATHS
+        inside = os.path.abspath(ACTIVE_CONFIG_DIR) + os.sep
+        kept   = [p for p in CONFIG_PATHS if not os.path.abspath(p).startswith(inside)]
+        paths  = sorted(set(found) | set(kept))
+        return _apply_config_paths(paths or [os.path.join(ACTIVE_CONFIG_DIR, 'dynamic.yml')])

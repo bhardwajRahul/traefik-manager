@@ -469,6 +469,7 @@ def _entrypoint_mw_map() -> dict:
         return {}
 
 def _build_all_apps(include_external=True, include_internal=False, complete=None):
+    env.refresh_config_paths()
     all_apps = []
     all_middlewares = []
     loaded = [(os.path.basename(p) if (env.MULTI_CONFIG or env.ACTIVE_CONFIG_DIR) else '', cfg_mod._load_config_display(p)) for p in env.CONFIG_PATHS]

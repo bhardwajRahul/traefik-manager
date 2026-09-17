@@ -5579,6 +5579,7 @@ def api_routes_all():
 @app.route('/api/configs')
 @login_required
 def api_configs():
+    env.refresh_config_paths()
     return jsonify({
         'files': [{'label': os.path.basename(p), 'path': p} for p in env.CONFIG_PATHS],
         'configDirSet': bool(ACTIVE_CONFIG_DIR),
