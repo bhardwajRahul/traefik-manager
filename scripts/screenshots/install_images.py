@@ -16,7 +16,7 @@ CAROUSEL = (
     "routes-add-service",
     "middlewares-cards", "middlewares-list", "middlewares-add",
     "services-cards", "services-list", "services-detail", "services-add", "services-edit",
-    "route-map", "tls-options", "certs",
+    "route-map", "tls-options", "certs", "certs-select", "certs-remove",
     "logs", "crowdsec",
     "plugins", "plugins-add",
     "static-config",

@@ -27,7 +27,9 @@ What it does:
    dynamic config without `certResolver` so no router shows an ACME error.
 3. Logs in through the real login page (password `screenshots`) and drives
    headless Chrome through every tab, view mode, modal and settings panel in
-   dark and light (`capture.mjs` - 38 views per theme).
+   dark and light (`capture.mjs` - 40 views per theme). Certificate removal is
+   shot as far as the confirmation, which is then cancelled, so nothing is
+   deleted and Traefik is never restarted.
 4. Resizes to 1920x1080, installs into `docs/public/images/` under the
    existing names, and rebuilds both README carousel GIFs
    (`install_images.py`).

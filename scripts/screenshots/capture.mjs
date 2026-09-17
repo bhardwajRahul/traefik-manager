@@ -2,6 +2,7 @@ import puppeteer from 'puppeteer';
 const BASE = 'http://tmshot-app:5000';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage', '--force-color-profile=srgb'] });
+const missing = [];
 
 async function capture(theme) {
     const ctx  = await browser.createBrowserContext();
@@ -60,7 +61,7 @@ async function capture(theme) {
         await js(`openServiceModal(_allServices[${svcIdx}])`); await sleep(1200); await shot('services-edit');
         await js(`closeServiceModal()`); await sleep(500);
     } else {
-        console.log('  ! jellyfin-service not in the list, skipping services-edit');
+        missing.push(`${theme}/services-edit: jellyfin-service is not in the list`);
     }
 
     await tab('dashboard', 4500);
@@ -69,6 +70,28 @@ async function capture(theme) {
     await shot('route-map');
     await tab('certs');
     await shot('certs');
+    const bulk = await js(`(() => {
+        if (typeof toggleCertBulkMode !== 'function' || !_certCanDelete()) return 0;
+        if (!_certBulk) toggleCertBulkMode();
+        selectUnusedCerts();
+        if (_certPicked.size < 2) _allCerts.slice(0, 2).forEach(c => toggleCertPick(_certKey(c)));
+        renderCertCards();
+        return _certPicked.size;
+    })()`);
+    if (bulk) {
+        await sleep(900);
+        await shot('certs-select');
+        await js(`(() => { bulkRemoveCerts(); return 1; })()`); await sleep(1600);
+        await js(`(() => {
+            const i = document.getElementById('customConfirmType');
+            if (i) { i.value = 'DELETE'; i.dispatchEvent(new Event('input', { bubbles: true })); }
+        })()`);
+        await shot('certs-remove');
+        await js(`document.getElementById('customConfirmCancel')?.click()`); await sleep(600);
+        await js(`if (_certBulk) toggleCertBulkMode()`); await sleep(500);
+    } else {
+        missing.push(`${theme}/certs-select and certs-remove: certificate removal is unavailable`);
+    }
     await js(`if (typeof _visibleTabsCache !== 'undefined' && !_visibleTabsCache.tls) toggleTabVisibility('tls')`); await sleep(700);
     await tab('tls', 2000);
     await shot('tls-options');
@@ -120,7 +143,7 @@ async function capture(theme) {
         await sleep(2500); await shot('settings-agent-keys');
         await js(`closeAgentKeys()`); await sleep(400);
     } else {
-        console.log('  ! no agent row to open keys from, skipping settings-agent-keys');
+        missing.push(`${theme}/settings-agent-keys: no agent row to open keys from`);
     }
     await js(`switchSettingsPanel('about')`); await sleep(1200); await shot('settings-about');
     await js(`closeSettingsModal()`);
@@ -130,8 +153,9 @@ async function capture(theme) {
     await shot('static-config');
 
     await tab('dashboard', 3000);
-    const row = await page.$('.rm-route-link');
+    const row = await page.$('.dsk-row');
     if (row) { await row.hover(); await sleep(400); await shot('dashboard-hover'); }
+    else missing.push(`${theme}/dashboard-hover: no .dsk-row on the dashboard`);
 
     await js(`setDashPodDensity('icons')`);
     await sleep(3000);
@@ -144,4 +168,8 @@ async function capture(theme) {
 await capture('dark');
 await capture('light');
 await browser.close();
+if (missing.length) {
+    console.log('MISSING SHOTS, the installed copies stay at their old version:');
+    missing.forEach(m => console.log('  ! ' + m));
+}
 console.log('done');
