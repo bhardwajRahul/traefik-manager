@@ -6,7 +6,7 @@
 
 **A clean, self-hosted web UI for your Traefik reverse proxy.**
 
-Routes, middlewares, certificates and logs, without editing YAML by hand.
+Routes, middlewares, Services, Plugins, certificates, crowdsec and logs, without editing YAML by hand.
 
 [![Version](https://img.shields.io/github/v/release/chr0nzz/traefik-manager)](https://github.com/chr0nzz/traefik-manager/releases)
 [![Build](https://img.shields.io/github/actions/workflow/status/chr0nzz/traefik-manager/docker.yml?logo=githubactions&logoColor=white&label=build)](https://github.com/chr0nzz/traefik-manager/actions/workflows/docker.yml)
