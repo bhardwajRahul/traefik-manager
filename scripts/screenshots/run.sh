@@ -20,7 +20,7 @@ WORK="$(mktemp -d)"
 cleanup() {
   docker rm -f tmshot-app tmshot-traefik tmshot-cs tmshot-agent >/dev/null 2>&1 || true
   docker network rm tmshot-net >/dev/null 2>&1 || true
-  docker run --rm -v "$WORK:/w" alpine rm -rf /w/node >/dev/null 2>&1 || true
+  docker run --rm -v "$WORK:/w" alpine sh -c 'rm -rf /w/* /w/.[!.]*' >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
