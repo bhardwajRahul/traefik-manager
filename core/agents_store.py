@@ -67,11 +67,19 @@ def parse_agent_dict(a: dict) -> dict:
         'provider_tabs_seen':           [str(t) for t in (a.get('provider_tabs_seen') or []) if str(t)],
     }
 
-def load_agents() -> list:
-    if os.path.exists(env.AGENTS_PATH):
+def load_agents(fresh: bool = False) -> list:
+    blob, digest = config.read_for_cache(env.AGENTS_PATH)
+    if not fresh:
+        hit = config.cached_parse('agents', digest)
+        if hit is not None:
+            return hit
+    return config.store_parse('agents', digest, _load_agents(blob))
+
+
+def _load_agents(blob) -> list:
+    if blob is not None:
         try:
-            with open(env.AGENTS_PATH, 'r') as f:
-                raw = config.yaml_safe.load(f) or {}
+            raw = config.yaml_safe.load(blob.decode('utf-8')) or {}
             return [
                 parse_agent_dict(a)
                 for a in (raw.get('agents', []) or [])

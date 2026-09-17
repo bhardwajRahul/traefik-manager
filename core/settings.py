@@ -228,7 +228,18 @@ def _new_channel_id():
     return 'ch_' + _s.token_hex(4)
 
 
-def load_settings() -> dict:
+def load_settings(fresh: bool = False) -> dict:
+    blob, digest = config.read_for_cache(env.SETTINGS_PATH)
+    _, agents_digest = config.read_for_cache(env.AGENTS_PATH)
+    key = None if digest is None else (digest, agents_digest)
+    if not fresh:
+        hit = config.cached_parse('settings', key)
+        if hit is not None:
+            return hit
+    return config.store_parse('settings', key, _load_settings(blob))
+
+
+def _load_settings(blob) -> dict:
     defaults = {
         'domains':              [d.strip() for d in os.environ.get('DOMAINS', 'example.com').split(',') if d.strip()] or ['example.com'],
         'cert_resolver':        os.environ.get('CERT_RESOLVER', 'cloudflare'),
@@ -297,11 +308,12 @@ def load_settings() -> dict:
         'agent_api_rate_limit':      int(os.environ.get('AGENT_API_RATE_LIMIT', 30)),
         'backup_keep_count':         int(os.environ.get('BACKUP_KEEP_COUNT', 0)),
     }
-    if not os.path.exists(env.SETTINGS_PATH):
+    if blob is None:
+        if os.path.exists(env.SETTINGS_PATH):
+            logger.warning(f"Could not read {env.SETTINGS_PATH}, using defaults")
         return defaults
     try:
-        with open(env.SETTINGS_PATH, 'r') as f:
-            raw = f.read()
+        raw = blob.decode('utf-8')
         try:
             data = config.yaml_safe.load(raw) or {}
         except Exception:

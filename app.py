@@ -757,12 +757,12 @@ def _reencrypt_file(name, read, write):
 
 def _reencrypt_plaintext_secrets():
     rewritten = []
-    if _reencrypt_file('manager.yml', load_settings, lambda s: save_settings(
+    if _reencrypt_file('manager.yml', lambda: load_settings(fresh=True), lambda s: save_settings(
             domains=s['domains'], cert_resolver=s['cert_resolver'],
             traefik_api_url=s['traefik_api_url'], auth_enabled=s['auth_enabled'],
             password_hash=s['password_hash'], visible_tabs=s['visible_tabs'])):
         rewritten.append('manager.yml')
-    if _reencrypt_file('agents.yml', _ag.load_agents, _ag.save_agents_file):
+    if _reencrypt_file('agents.yml', lambda: _ag.load_agents(fresh=True), _ag.save_agents_file):
         rewritten.append('agents.yml')
     crypto.clear_plaintext_seen()
     return rewritten

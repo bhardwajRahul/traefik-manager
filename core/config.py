@@ -1,4 +1,6 @@
+import copy
 import errno
+import hashlib
 import os
 import re
 import shutil
@@ -39,6 +41,44 @@ class ThreadLocalYAML:
 
 yaml = ThreadLocalYAML()
 yaml_safe = ThreadLocalYAML(typ='safe')
+
+
+_parsed_cache = {}
+_parsed_cache_lock = threading.Lock()
+
+
+def read_for_cache(path):
+    try:
+        with open(path, 'rb') as fh:
+            blob = fh.read()
+    except OSError:
+        return None, None
+    return blob, hashlib.blake2b(blob, digest_size=16).digest()
+
+
+def cached_parse(name, digest):
+    if digest is None:
+        return None
+    with _parsed_cache_lock:
+        hit = _parsed_cache.get(name)
+    if hit is None or hit[0] != digest:
+        return None
+    return copy.deepcopy(hit[1])
+
+
+def store_parse(name, digest, value):
+    if digest is not None:
+        with _parsed_cache_lock:
+            _parsed_cache[name] = (digest, copy.deepcopy(value))
+    return value
+
+
+def forget_parse(name=None):
+    with _parsed_cache_lock:
+        if name is None:
+            _parsed_cache.clear()
+        else:
+            _parsed_cache.pop(name, None)
 
 
 _INPLACE_PATHS = set()
