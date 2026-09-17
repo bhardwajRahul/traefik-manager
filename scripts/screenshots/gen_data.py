@@ -24,8 +24,10 @@ def make_cert(main, sans, days):
 
 certs = [
     ("jellyfin.example.com", [], 82),
+    ("wiki.example.com", [], 77),
     ("*.example.com", ["example.com"], 74),
     ("vault.example.com", [], 61),
+    ("paperless.example.com", [], 52),
     ("cloud.example.com", ["office.example.com"], 47),
     ("home.example.com", [], 33),
     ("status.example.com", [], 9),

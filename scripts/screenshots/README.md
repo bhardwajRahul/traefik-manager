@@ -20,8 +20,10 @@ What it does:
 1. Seeds demo data: 20 routes named after real apps (so dashboard groups and
    icons resolve), middlewares, multi-backend/TCP/UDP/shared-service examples,
    a weighted and a mirroring service (one of them managed by Traefik Manager,
-   so the ownership and edit paths are shot), six self-signed certificates with
-   staggered expiries, and a generated JSON access log (`gen_data.py`).
+   so the ownership and edit paths are shot), eight self-signed certificates with
+   staggered expiries (two of them for domains no router serves, so **Select
+   unused** has something to find), and a generated JSON access log
+   (`gen_data.py`).
 2. Boots Traefik v3.6 + Traefik Manager on a private docker network so live
    stats, entry points and router status are real. Traefik gets a copy of the
    dynamic config without `certResolver` so no router shows an ACME error.
