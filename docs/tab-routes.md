@@ -36,6 +36,16 @@ The config file chip appears in the footer only when your routes span more than 
 
 ## Detail panel
 
+**Use a service** lists services from every provider, not just your own config files, the same way
+the middleware picker already does. Your own services come first under `This config`; the rest are
+grouped by provider and marked read only, since Traefik Manager cannot edit them. Picking one writes
+the qualified name, for example `whoami@docker`, and the route stops resolving if that provider ever
+stops publishing it.
+
+`noop@internal` is in that list for HTTP routes. Use it for a router whose whole job is a middleware,
+such as a redirect: Traefik answers these itself, so there is no backend to check and the route is
+not health checked. Traefik has no noop service for TCP or UDP.
+
 Route, service and middleware names accept anything Traefik does, except `@ / , : { }` and names over 100 characters. Spaces and brackets are fine.
 
 Click a card, or **More - View Details**. The panel shows a traffic flow diagram (entry points, router, service), then Router Details, TLS, Middlewares and Service sections, filled from the Traefik API where it is reachable. Middleware chips open the middleware they name.
@@ -68,11 +78,11 @@ Click **Add Route** in the top bar. Fields marked with a protocol apply to that 
 | Target IP / Host + Port | *(TCP, UDP)* Backend server to forward to |
 | Entry Points | Chips fetched from the Traefik API - click to toggle. `websecure` (or `https`) is pre-selected for HTTP. UDP is single-select. Falls back to a text input if the API returns no entry points. |
 | Middlewares | Chips from the Traefik API and your config files - click to toggle. HTTP routes offer HTTP middlewares; TCP routes offer TCP middlewares (`ipAllowList`, `inFlightConn`). Falls back to a text input only when neither source yields any. |
-| Scheme | `HTTP` or `HTTPS` - the scheme Traefik uses to reach your backend. Use `HTTPS` when the backend serves TLS itself. On HTTP routes it sits on each backend row; on TCP and UDP it is a single field. |
+| Scheme | `HTTP`, `HTTPS` or `h2c` - the scheme Traefik uses to reach your backend. Use `HTTPS` when the backend serves TLS itself, and `h2c` for cleartext HTTP/2, which Traefik 3.7.13 and later reach only through this scheme. On HTTP routes it sits on each backend row; on TCP and UDP it is a single field. |
 | Pass Host Header | *(HTTP)* Enabled by default. Disable if the backend needs to see its own hostname instead of the original `Host` header; writes `passHostHeader: false` on the service. |
 | TLS Mode | *(TCP)* **No TLS**, **TLS** (reveals Cert Resolver), or **Passthrough**, which writes `tls.passthrough: true` |
 | Cert Resolver | *(HTTP, TCP)* **No TLS** (default, HTTP) omits the `tls` key; a **named resolver** issues a certificate via ACME; **None (external / custom cert)** writes `tls: {}` for certificates managed in `tls.yml` or elsewhere. Named resolvers come from the Cert Resolver field in Settings plus your static config's `certificatesResolvers`, so a custom resolver needs no re-typing. A remote agent contributes its own resolvers. |
-| Request wildcard certificate | Appears once TLS is on. Adds a `tls.domains` block with `main: yourdomain.com` and `sans: *.yourdomain.com` from the selected domain. Use with DNS challenge resolvers (Cloudflare, Route 53, etc.). |
+| Request wildcard certificate | Appears once TLS is on. Adds a `tls.domains` block, prefilled with `main: yourdomain.com` and `sans: *.yourdomain.com` from the selected domain. Both are editable, so a route can pre-issue any certificate: put one domain per line under Extra domains. A wildcard needs a DNS challenge resolver (Cloudflare, Route 53, etc.). |
 | TLS Options Profile | Appears once TLS is on. Assigns a named `tls.options` profile from the [TLS Options tab](tab-tls-options.md) to this router. Leave blank for Traefik's defaults. |
 | Skip TLS Verification | *(HTTP)* Adds `insecureSkipVerify: true` on a `<service>-transport` serversTransport, for backends with self-signed certificates (Proxmox, Kasm). Flags the card with a warning shield. |
 | Security headers preset | *(HTTP)* Generates a tool-managed `<route>-headers` middleware and attaches it. See [Security headers preset](#security-headers-preset). |

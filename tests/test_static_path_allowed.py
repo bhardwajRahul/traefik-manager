@@ -36,7 +36,7 @@ def test_registering_a_settings_path_opens_it(monkeypatch, tmp_path):
     env_mod, config_mod = _reload(monkeypatch, tmp_path, '')
     assert config_mod.safe_file_path(static) == '', 'unregistered path should be blocked'
 
-    env_mod.register_static_path(static)
+    env_mod.set_settings_paths('static', static)
     importlib.reload(config_mod)
     assert config_mod.safe_file_path(static) == os.path.realpath(static)
 
@@ -48,3 +48,12 @@ def test_an_unrelated_path_is_still_blocked(monkeypatch, tmp_path):
     import core.config as config_mod
     assert config_mod.safe_file_path('/etc/shadow') == ''
     assert config_mod.safe_file_path('/etc/passwd') == ''
+
+
+def test_the_app_directory_is_not_writable_as_a_whole(monkeypatch, tmp_path):
+    static = str(tmp_path / 'etc' / 'traefik' / 'traefik.yml')
+    os.makedirs(os.path.dirname(static), exist_ok=True)
+    env_mod, config_mod = _reload(monkeypatch, tmp_path, static)
+    assert '/app/' not in env_mod.ALLOWED_FILE_PREFIXES
+    assert config_mod.safe_file_path('/app/gunicorn.conf.py') == ''
+    assert config_mod.safe_file_path('/app/core/auth.py') == ''

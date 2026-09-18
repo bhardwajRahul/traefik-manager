@@ -97,14 +97,26 @@
 {% endif %}
 
 <div id="customConfirmOverlay" style="display:none;position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,0.5);backdrop-filter:blur(3px);align-items:center;justify-content:center;">
-    <div style="max-width:380px;width:90%;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;box-shadow:0 16px 48px rgba(0,0,0,0.4);">
-        <p class="font-semibold text-sm mb-1" style="color:var(--text)" id="customConfirmTitle"></p>
-        <p class="text-sm mb-6" style="color:var(--muted);line-height:1.6" id="customConfirmMsg"></p>
-        <div id="customConfirmTypeWrap" style="display:none;margin:-12px 0 18px">
+    <div style="max-width:440px;width:90%;background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,0.4);">
+        <div style="display:flex;align-items:center;gap:10px;padding:18px 22px 0">
+            <i id="customConfirmIcon" class="ph-bold ph-warning-circle" style="display:none;font-size:18px;color:var(--red);flex-shrink:0"></i>
+            <p class="font-semibold text-sm" style="color:var(--text);margin:0" id="customConfirmTitle"></p>
+        </div>
+        <div style="padding:10px 22px 0">
+            <p class="text-sm" style="color:var(--muted);line-height:1.6;margin:0" id="customConfirmMsg"></p>
+        </div>
+        <div id="customConfirmNotes" style="display:none;flex-direction:column;gap:8px;padding:14px 22px 0"></div>
+        <div id="customConfirmCheckWrap" style="display:none;padding:14px 22px 0">
+            <label class="confirm-opt">
+                <input type="checkbox" id="customConfirmCheck" style="accent-color:var(--red);margin-top:1px;flex-shrink:0;width:15px;height:15px;cursor:pointer">
+                <span id="customConfirmCheckLabel"></span>
+            </label>
+        </div>
+        <div id="customConfirmTypeWrap" style="display:none;padding:16px 22px 0">
             <label class="text-xs block mb-1.5" style="color:var(--muted)">Type <button type="button" id="customConfirmWord" title="Click to copy" style="color:var(--red);letter-spacing:0.06em;font-weight:700;background:none;border:none;padding:0 2px;cursor:copy;font-size:inherit;font-family:inherit">DELETE</button> to confirm</label>
             <input type="text" id="customConfirmType" class="input-field" autocomplete="off" spellcheck="false" placeholder="DELETE">
         </div>
-        <div class="flex gap-2 justify-end">
+        <div class="flex gap-2 justify-end" style="padding:18px 22px;margin-top:4px">
             <button id="customConfirmCancel" class="btn-secondary text-xs">Cancel</button>
             <button id="customConfirmOk" class="btn-primary text-xs">Confirm</button>
         </div>
@@ -264,7 +276,7 @@
             <i class="ph-bold ph-caret-double-left" id="sideNavCollapseIcon"></i><span class="side-nav-toggle-label">Collapse</span>
         </button>
         {% if auth_enabled %}
-        <form method="POST" action="{{ url_for('logout') }}">
+        <form method="POST" action="{{ url_for('logout') }}" onsubmit="tabCacheClear()">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" id="sideNavLogoutBtn" title="Sign out">
                 <i class="ph-bold ph-sign-out"></i><span class="side-nav-toggle-label">Sign out</span>
@@ -306,6 +318,7 @@
     {% include 'tabs/tab_swarm.html' %}
 
     {% include 'tabs/tab_nomad.html' %}
+    {% include 'tabs/tab_internal.html' %}
 
     {% include 'tabs/tab_ecs.html' %}
 
@@ -368,6 +381,7 @@ function _csrfHeaders() {
     return { 'X-CSRF-Token': token };
 }
 
+window._tmAssetVersion = '{{ asset_version }}';
 let _activeAgent = null;
 const _agentRegistry = {};
 let _agentList = [];
@@ -466,7 +480,7 @@ function _renderServerSwitcherList(runHealthChecks) {
     wrap.style.display = agents.length ? '' : 'none';
     const localActive = !_activeAgent;
     const desktopItem = (id, label, dotColor, active, dotId) =>
-        `<div class="notif-item${active ? ' active' : ''}" onclick="${id ? `switchServer('${id}')` : 'switchServer(null)'}" style="cursor:pointer;${active?'background:var(--input-bg);':''}">
+        `<div class="notif-item${active ? ' active' : ''}" onclick="${id ? `switchServer(${_jsArg(id)})` : 'switchServer(null)'}" style="cursor:pointer;${active?'background:var(--input-bg);':''}">
             <div class="flex items-center gap-2 py-1">
                 <span class="w-2 h-2 rounded-full flex-shrink-0" style="background:${dotColor}"${dotId ? ` id="${dotId}"` : ''}></span>
                 <div style="min-width:0;flex:1;"><div class="text-xs font-medium truncate" style="color:var(--text)">${label}</div></div>
@@ -527,7 +541,7 @@ function _renderDrawerServerList() {
             <circle cx="452" cy="256" r="26" fill="currentColor"/>
         </svg></span>`;
     const item = (id, icon, title, subText, active, dotColor) =>
-        `<button class="drawer-srv-item${active ? ' active' : ''}" onclick="_drawerPickServer(${id ? `'${id}'` : 'null'})">
+        `<button class="drawer-srv-item${active ? ' active' : ''}" onclick="_drawerPickServer(${id ? `${_jsArg(id)}` : 'null'})">
             ${icon ? `<i class="ph-bold ${icon}"></i>` : TM_MARK}
             <span class="drawer-srv-t">
                 <span class="drawer-srv-n">${title}</span>
@@ -600,9 +614,14 @@ function switchServer(agentId) {
     _inflightEntrypoints = null;
     _inflightMiddlewares = null;
     _inflightCertResolvers = null;
+    _inflightServicesList = null;
+    if (typeof _dropConfigFilesCache === 'function') _dropConfigFilesCache();
     _customDomains = [];
     if (agent) document.getElementById('selfRouteEpWarning')?.remove();
-    if (typeof window.rmInvalidateData === 'function') window.rmInvalidateData();
+    if (typeof tabCacheForgetAll === 'function') tabCacheForgetAll();
+    if (typeof window.rmServerChanged === 'function') window.rmServerChanged();
+    if (typeof window._sdServerChanged === 'function') window._sdServerChanged();
+    if (typeof window._certServerChanged === 'function') window._certServerChanged();
     if (agent) {
         const stored = JSON.parse(localStorage.getItem('tm_tabs_agent_' + agent.id) || '{}');
         const hub = agent.visible_tabs || {};

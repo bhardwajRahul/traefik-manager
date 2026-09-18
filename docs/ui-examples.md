@@ -116,10 +116,20 @@ TLS profiles with minimum versions, cipher suites and mTLS, assignable per route
 
 ## Certificates
 
-Every certificate from every resolver, with expiry warnings.
+Every certificate from every resolver, with expiry warnings, and filters for registered domain, unused, no resolver and expiring.
 
 <img class="screenshot dark-only" src="/images/dark-certs.png" alt="Certificates">
 <img class="screenshot light-only" src="/images/light-certs.png" alt="Certificates">
+
+Pick several at once, or let **Select unused** pick every certificate no router serves.
+
+<img class="screenshot dark-only" src="/images/dark-certs-select.png" alt="Selecting certificates to remove">
+<img class="screenshot light-only" src="/images/light-certs-select.png" alt="Selecting certificates to remove">
+
+Removal says what it will do first: Traefik restarts afterwards, certificates still serving a route are requested again, and a copy of `acme.json` goes to your backups. See [Removing a certificate](tab-certs.md#removing-a-certificate).
+
+<img class="screenshot dark-only" src="/images/dark-certs-remove.png" alt="Confirming certificate removal">
+<img class="screenshot light-only" src="/images/light-certs-remove.png" alt="Confirming certificate removal">
 
 ## Logs
 

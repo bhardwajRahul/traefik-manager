@@ -10,7 +10,7 @@ It is off by default. Once a static config path is set and the file exists, a **
 | Settings | As a **Static Config** panel in the Settings sidebar. |
 | Tab | As its own tab in the side navigation. |
 
-The path comes from the `static_config_path` field in `manager.yml` (**Settings → System Monitoring → File Paths**) if set, otherwise from the `STATIC_CONFIG_PATH` environment variable.
+The path comes from the `static_config_path` field in `manager.yml` (**Settings → System Monitoring → File Paths**) if set, otherwise from the `STATIC_CONFIG_PATH` environment variable. A path set in Settings must be an existing `.yml`, `.yaml` or `.toml` file outside Traefik Manager's own files ([rules](manager-yml.md#file-paths)).
 
 Everything here also works for [remote agents](agent.md#static-config-editing): with an agent selected in the server switcher, the same section editors read and write the agent's own `traefik.yml`, with the agent's backup and restart flow.
 

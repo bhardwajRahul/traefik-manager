@@ -327,3 +327,11 @@ def test_stdin_returns_without_waiting_for_the_stream_to_close(runner):
             proc.stdin.close()
         except Exception:
             pass
+
+
+def test_a_reset_signs_out_every_session(runner):
+    before = settings_mod.load_settings().get('session_epoch', 0)
+    assert _run(runner).exit_code == 0
+    assert settings_mod.load_settings()['session_epoch'] == before + 1
+    assert _run(runner, '--disable-otp').exit_code == 0
+    assert settings_mod.load_settings()['session_epoch'] == before + 2

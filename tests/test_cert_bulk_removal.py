@@ -1,0 +1,142 @@
+import os
+import shutil
+import subprocess
+
+import pytest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DRIVER = os.path.join(ROOT, 'scripts', 'test_cert_bulk_removal.mjs')
+
+
+def _read(*parts):
+    with open(os.path.join(ROOT, *parts), encoding='utf-8') as fh:
+        return fh.read()
+
+
+def test_the_bulk_driver_ships_with_the_repo():
+    assert os.path.isfile(DRIVER), (
+        'scripts/test_cert_bulk_removal.mjs is the only executable coverage for removing '
+        'several certificates at once, including the restart screen it has to show')
+
+
+def test_bulk_removal_behaves():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node is not installed, run scripts/test_cert_bulk_removal.mjs where it is')
+    proc = subprocess.run([node, DRIVER], cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, (
+        'the bulk certificate removal driver failed:\n%s\n%s' % (proc.stdout, proc.stderr))
+
+
+def test_the_certs_tab_selects_like_the_routes_tab():
+    certs  = _read('templates', 'tabs', 'tab_certs.html')
+    routes = _read('templates', 'tabs', 'tab_services.html')
+    for html in (certs, routes):
+        assert 'ph-bold ph-selection' in html, \
+            'both tabs use the same selection icon, and neither labels the button'
+    assert '> Select<' not in certs and 'ph-check-square' not in certs, \
+        'the routes toolbar button carries an icon only, the certs one invented a text label'
+    assert 'title="Bulk select"' in certs
+    assert 'title="Exit bulk mode"' in certs, 'the routes bar can be dismissed, this one has to be too'
+    for html in (certs, routes):
+        bar = html[html.index('BulkBar"' if 'certBulkBar"' in html else 'bulkBar"'):][:200]
+        assert 'margin-bottom:16px' in bar, \
+            'without a gap the sticky bar sits flush against the first row of cards'
+
+
+def test_the_restart_screen_can_hand_back_instead_of_reloading():
+    js = _read('static', 'js', 'static-config.js')
+    body = js[js.index('async function _waitForReconnect('):js.index('async function triggerTraefikRestart(')]
+    assert 'onBack = null' in body and "typeof onBack === 'function'" in body, \
+        'a tab that only needs its own data back should not have the whole page reloaded under it'
+    assert 'location.reload()' in body, 'the static config editor still needs the full reload'
+    certs = _read('static', 'js', 'certs.js')
+    send = certs[certs.index('async function _sendCertRemoval('):certs.index('async function _loadCertUsage(')]
+    assert '_waitForReconnect(false, () => back(body.removed))' in send
+    assert 'refreshCertsTab()' in send, 'the tab still shows the certificate that was just removed otherwise'
+    assert 'location.reload' not in send
+
+
+def test_the_delete_dialog_opens_without_waiting_for_the_certificate_lookup():
+    js = _read('static', 'js', 'routes.js')
+    for fn, nxt in (('async function deleteRoute(', 'const answer = await _confirmWith({'),
+                    ('async function bulkDelete()', 'const answer  = await _confirmWith({')):
+        body = js[js.index(fn):]
+        body = body[:body.index(nxt)]
+        assert 'await _routeCertOption' not in body, (
+            '%s blocked on three API calls before the dialog appeared, which on a host with many '
+            'certificates is seconds of nothing happening' % fn)
+    assert js.count('checkboxAsync:') == 2, 'both delete paths offer the certificate the same way'
+    certs = _read('static', 'js', 'certs.js')
+    body = certs[certs.index('async function _certsForRoutes('):certs.index('async function removeCerts(')]
+    assert body.index('_loadCertManage(srv)') < body.index("'/api/certs/usage?'"), \
+        'a read-only mount should cost one call, not three'
+
+
+def test_the_confirmation_reads_as_a_dialog_not_a_wall_of_capitals():
+    html = _read('templates', 'index.html')
+    box  = html[html.index('<div id="customConfirmOverlay"'):html.index('id="customConfirmOk"')]
+    assert 'class="confirm-opt"' in box, \
+        'the option sat in a bare label, which the global label rule renders in shouting capitals'
+    assert 'id="customConfirmIcon"' in box, 'a destructive dialog says so before the text does'
+    css = _read('static', 'css', 'app.css')
+    opt = css[css.index('.confirm-opt {'):css.index('.confirm-opt:hover')]
+    assert 'text-transform: none' in opt and 'letter-spacing: 0' in opt
+    assert 'border' in opt and 'border-radius' in opt, \
+        'the option needs to read as a control, not as another paragraph of the message'
+    js = _read('static', 'js', 'static-config.js')
+    body = js[js.index('function _confirmWith('):js.index('function _monacoThemeName(')]
+    assert "icon.style.display = danger ? '' : 'none'" in body
+    assert 'checkboxAsync' in body and 'showCheck' in body
+    assert "checkWrap.style.display !== 'none'" in body, \
+        'a checkbox that never appeared must not come back checked from a previous dialog'
+
+
+def test_the_restart_screen_is_up_before_the_request_leaves():
+    js = _read('static', 'js', 'certs.js')
+    body = js[js.index('async function _sendCertRemoval('):js.index('async function _loadCertUsage(')]
+    assert body.index('_showRestartOverlay()') < body.index("fetch('/api/certs/delete'"), (
+        'the server restarts Traefik before it answers, so on a host behind that Traefik the reply '
+        'never arrives and an overlay shown afterwards is never shown at all')
+    assert 'res.status === 502 || res.status === 504' in body, \
+        'the proxy answers 502 while Traefik is coming back, that is the restart, not a failure'
+    catch = body[body.index('} catch (e) {'):]
+    assert '_waitForReconnect(true' in catch, \
+        'a request that dies with the connection means the restart happened, not that it failed'
+
+
+def test_the_certs_tab_can_be_filtered():
+    html = _read('templates', 'tabs', 'tab_certs.html')
+    assert 'id="certDomainFilter"' in html, 'a store with 145 certificates needs narrowing by domain'
+    for kind in ('all', 'unused', 'orphaned', 'expiring'):
+        assert 'id="certf-%s"' % kind in html
+    assert html.count('proto-btn active-http') >= 1, 'the filter group marks the active one like every other tab'
+    js = _read('static', 'js', 'certs.js')
+    for fn in ('function filterCertsBy(', 'function _certBaseDomain(', 'function _certMatchesFilter(',
+               'function _paintCertDomainFilter('):
+        assert fn in js, fn
+    body = js[js.index('function renderCertCards()'):]
+    body = body[:body.index('const cards = items.map')]
+    assert '_certMatchesFilter(cert)' in body and '_certBaseDomain(d) === domain' in body, \
+        'the filters have to actually narrow the rendered list'
+
+
+def test_route_delete_asks_the_server_what_else_uses_a_certificate():
+    certs = _read('static', 'js', 'certs.js')
+    body = certs[certs.index('async function _certsForRoutes('):certs.index('async function removeCerts(')]
+    assert "qs.append('exclude'" in body and 'unused_known' in body and '.unused' in body
+    assert 'stillUsed' not in body, \
+        'the browser only saw config-file routes, so a Docker router still using the certificate was missed'
+
+
+def test_certificate_state_is_bound_to_the_server_it_came_from():
+    certs = _read('static', 'js', 'certs.js')
+    send = certs[certs.index('async function _sendCertRemoval('):certs.index('async function _loadCertUsage(')]
+    assert '_tlsSrv()' not in send, \
+        'the removal must go to the server the rows were loaded from, not whichever is selected now'
+    refresh = certs[certs.index('async function refreshCertsTab('):certs.index('let _tlsOptions = [];')]
+    assert '_certLoadSeq' in refresh and 'stale()' in refresh
+    index = _read('templates', 'index.html')
+    switch = index[index.index('function switchServer('):]
+    switch = switch[:switch.index('\n}\n')]
+    assert '_certServerChanged' in switch, 'switching servers must drop the certificate selection'

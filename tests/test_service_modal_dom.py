@@ -198,7 +198,19 @@ def test_editing_parses_the_scheme_back_out():
     js = _read('static', 'js', 'services.js')
     m = re.search(r'function _svcUrlToRow\(url\) \{(.*?)\n\}', js, re.S)
     assert m, 'the url parser moved'
-    assert "startsWith('https://')" in m.group(1)
+    body = m.group(1)
+    assert '_SVC_SCHEME_RE' in body, 'the scheme has to be read from one pattern, not matched one by one'
+
+    pattern = re.search(r'const _SVC_SCHEME_RE = /(.+?)/i;', js)
+    assert pattern, 'the scheme pattern moved'
+    rx = re.compile(pattern.group(1).replace('\\/', '/'), re.I)
+    for url, scheme, address in (('https://10.0.0.5:443', 'https', '10.0.0.5:443'),
+                                 ('http://10.0.0.5:80', 'http', '10.0.0.5:80'),
+                                 ('h2c://10.0.0.5:9090', 'h2c', '10.0.0.5:9090'),
+                                 ('10.0.0.5:80', None, '10.0.0.5:80')):
+        hit = rx.match(url)
+        assert (hit.group(1).lower() if hit else None) == scheme, url
+        assert rx.sub('', url) == address, url
 
 
 def test_editing_a_composite_loads_the_real_child_address():

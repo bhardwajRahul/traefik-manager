@@ -85,7 +85,7 @@ from `manager.yml` and restart.
 
 | Variable | Default | Precedence | Description |
 |---|---|---|---|
-| `ACME_JSON_PATH` | `/app/acme.json` | Fallback `acme_json_path` | Path to `acme.json` for the Certificates tab. Accepts several files comma-separated, or a directory |
+| `ACME_JSON_PATH` | `/app/acme.json` | Fallback `acme_json_path` | Path to `acme.json` for the Certificates tab. Accepts several files comma-separated, or a directory. Read-only unless you mount it read-write to remove certificates |
 | `ACCESS_LOG_PATH` | `/app/logs/access.log` | Fallback `access_log_path` | Path to access log for the Logs tab |
 | `PLUGINS_DIR` | _(unset)_ | - | Adds Traefik's plugins directory to the paths TM is allowed to read. Not needed for the Plugins tab, which reads `experimental.plugins` from the static config |
 | `GEOIP_DB_PATH` | _(auto-downloaded)_ | Fallback `geoip_db_path` | Path to a custom GeoIP `.mmdb` for [IP geolocation](geoip.md) |
@@ -112,8 +112,19 @@ from `manager.yml` and restart.
 |---|---|---|---|
 | `SECRET_KEY` | _(auto-generated)_ | - | Flask session signing key |
 | `INACTIVITY_TIMEOUT_MINUTES` | `120` | - | Log out after this many minutes of inactivity |
+| `LOGIN_FAILURE_LIMIT` | `30 per minute;200 per hour` | - | Wrong passwords allowed across all addresses before login is paused. Empty or `off` disables |
+| `OTP_FAILURE_LIMIT` | `10 per minute;30 per hour` | - | Wrong 2FA codes allowed across all addresses before the code step is paused. Empty or `off` disables |
 | `OTP_ENCRYPTION_KEY` | _(auto-generated)_ | - | Fernet key for every secret stored encrypted in `manager.yml` |
 | `PROXY_FIX_HOPS` | `1` | - | Number of trusted proxy hops in front of Traefik Manager for `X-Forwarded-For` |
+| `TRUSTED_PROXIES` | loopback, private and CGNAT ranges | - | Addresses allowed to set `X-Forwarded-For`, `-Proto` and `-Host`. `*` trusts every peer |
+| `WEB_CONCURRENCY` | `2` | - | Worker processes. Each costs about 50 MB. Raise for more fault isolation, not for speed |
+| `GUNICORN_THREADS` | `4` | - | Requests served at once per worker. Traefik Manager spends most of its time waiting on Traefik and on agents, so threads are what make pages load in parallel. `WEB_CONCURRENCY x GUNICORN_THREADS` is the total |
+| `GUNICORN_TIMEOUT` | `60` | - | Seconds before the supervisor restarts a worker that has stopped responding. A restart drops every request that worker is handling, so leave room above the 15 second agent timeout |
+| `GUNICORN_GRACEFUL_TIMEOUT` | `30` | - | Seconds a worker is given to finish in-flight requests when asked to stop |
+| `GUNICORN_KEEPALIVE` | `5` | - | Seconds an idle connection is held open |
+| `GUNICORN_WORKER_CONNECTIONS` | `200` | - | Connections a worker will accept before new ones wait in the kernel backlog |
+| `GUNICORN_LOG_LEVEL` | `info` | - | Gunicorn's own log level |
+| `GUNICORN_BIND` | `0.0.0.0:5000` | - | Address the server binds inside the container. Change the published port in your compose file instead |
 | `BASE_PATH` | _(none)_ | - | Serve Traefik Manager under a sub path, for example `/traefik-manager` |
 | `LOG_LEVEL` | `INFO` | - | Python log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
@@ -606,6 +617,8 @@ Environment=ACME_JSON_PATH=/etc/traefik/acme.json
 ```
 :::
 
+Mounting it `:ro` is enough to see certificates and to know which of them nothing uses. Drop the `:ro` and set a [restart method](#restart-method) to let the Certs tab delete a certificate Traefik keeps renewing. See [Certs tab](tab-certs.md#removing-a-certificate).
+
 ---
 
 ### `ACCESS_LOG_PATH`
@@ -880,6 +893,28 @@ provider to include the prefix, or sign in will fail after the redirect.
 :::
 
 Use a sub domain instead where you can. It needs no configuration on either side.
+
+---
+
+### `TRUSTED_PROXIES`
+
+**Default:** `127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7,fe80::/10,100.64.0.0/10`
+
+Comma-separated addresses or networks allowed to set forwarding headers. A request from any other address has its `X-Forwarded-For`, `X-Forwarded-Proto` and `X-Forwarded-Host` ignored, so a client that reaches Traefik Manager directly cannot choose its own IP for the login rate limit or the audit log. The default covers Docker networks, a LAN, loopback and Tailscale. If your reverse proxy connects from a public address, add that address, or set `*` to trust every peer.
+
+The active list is shown in the startup log as `Trusted Proxies` and in the Client IP Diagnostic.
+
+:::tabs
+== Docker / Podman
+```yaml
+environment:
+  - TRUSTED_PROXIES=203.0.113.10,172.16.0.0/12
+```
+== Linux (systemd)
+```ini
+Environment=TRUSTED_PROXIES=203.0.113.10,172.16.0.0/12
+```
+:::
 
 ---
 

@@ -9,10 +9,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-const Version = "1.13.5"
+const Version = "1.14.0"
 
 type Config struct {
 	APIKey                    string
@@ -59,6 +60,7 @@ type App struct {
 	csClient   *http.Client
 	keys       *keyStore
 	events     *eventLog
+	cfgMu      sync.Mutex
 }
 
 func buildCSClient(cfg *Config) *http.Client {
@@ -222,6 +224,10 @@ func (a *App) router(w http.ResponseWriter, r *http.Request) {
 		a.traefikProxy(w, r, "/api/version")
 	case p == "/api/traefik/logs" && m == http.MethodGet:
 		a.logsHandler(w, r)
+	case p == "/api/traefik/certs/status" && m == http.MethodGet:
+		a.certsStatusHandler(w, r)
+	case p == "/api/traefik/certs/delete" && m == http.MethodPost:
+		a.certsDeleteHandler(w, r)
 	case p == "/api/traefik/certs" && m == http.MethodGet:
 		a.certsHandler(w, r)
 	case p == "/api/traefik/plugins" && m == http.MethodGet:
@@ -247,6 +253,10 @@ func (a *App) router(w http.ResponseWriter, r *http.Request) {
 		a.crowdsecAddDecisionHandler(w, r)
 	case p == "/api/crowdsec/alerts" && m == http.MethodGet:
 		a.crowdsecAlertsHandler(w, r)
+	case p == "/api/crowdsec/summary" && m == http.MethodGet:
+		a.crowdsecSummaryHandler(w, r)
+	case p == "/api/crowdsec/decisions/search" && m == http.MethodGet:
+		a.crowdsecDecisionsSearchHandler(w, r)
 	case strings.HasPrefix(p, "/api/crowdsec/decisions/") && m == http.MethodDelete:
 		id := strings.TrimPrefix(p, "/api/crowdsec/decisions/")
 		a.crowdsecProxy(w, r, http.MethodDelete, "/v1/decisions/"+id)

@@ -54,6 +54,12 @@ sed -i \
 cp /tmp/package/files/* "$VENDOR/fonts/jetbrains-mono/"
 rm -rf /tmp/package
 
+echo "Downloading country flag font..."
+curl -sL "https://registry.npmjs.org/country-flag-emoji-polyfill/-/country-flag-emoji-polyfill-0.1.10.tgz" | tar -xz -C /tmp
+cp /tmp/package/dist/TwemojiCountryFlags.woff2 "$VENDOR/fonts/"
+cp /tmp/package/LICENSE.md "$VENDOR/fonts/TwemojiCountryFlags-LICENSE.md"
+rm -rf /tmp/package
+
 echo "Building Tailwind CSS..."
 TW_BIN="$(command -v tailwindcss || true)"
 if [ -z "$TW_BIN" ]; then

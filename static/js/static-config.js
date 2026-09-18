@@ -7,7 +7,17 @@ let _staticPendingChanges  = false;
 let _staticSectionEdits    = false;
 let _staticSaved           = false;
 
-function _confirm(message, title, okLabel, typeWord) {
+function _confirm(message, title, okLabel, typeWord, opts) {
+    return _confirmWith({ message, title, okLabel, typeWord, ...(opts || {}) }).then(r => r.ok);
+}
+
+function _confirmWith(o) {
+    const { message, title, okLabel, typeWord } = o || {};
+    const notes   = (o && o.notes) || [];
+    const check   = (o && o.checkbox) || null;
+    const later   = (o && o.checkboxAsync) || null;
+    const danger  = (o && o.danger !== undefined) ? o.danger
+                    : /delete|remove|revoke|reset/i.test(String(okLabel || ''));
     return new Promise(resolve => {
         const overlay = document.getElementById('customConfirmOverlay');
         const msg     = document.getElementById('customConfirmMsg');
@@ -24,23 +34,52 @@ function _confirm(message, title, okLabel, typeWord) {
         if (wrap)   wrap.style.display = word ? '' : 'none';
         if (wordEl) wordEl.textContent = word;
         if (input) { input.value = ''; input.placeholder = word; }
+        const noteBox  = document.getElementById('customConfirmNotes');
+        const checkWrap = document.getElementById('customConfirmCheckWrap');
+        const checkBox  = document.getElementById('customConfirmCheck');
+        const checkLbl  = document.getElementById('customConfirmCheckLabel');
+        if (noteBox) {
+            noteBox.innerHTML = notes.map(n =>
+                '<div class="rounded-lg px-3 py-2.5 flex items-start gap-2 text-xs" '
+                + 'style="background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.25);color:var(--text)">'
+                + '<i class="ph-bold ph-warning-circle shrink-0" style="color:var(--red);margin-top:1px"></i>'
+                + '<span>' + _esc(n) + '</span></div>').join('');
+            noteBox.style.display = notes.length ? 'flex' : 'none';
+        }
+        const showCheck = (c) => {
+            if (checkWrap) checkWrap.style.display = c ? '' : 'none';
+            if (checkBox)  checkBox.checked = !!(c && c.checked);
+            if (checkLbl)  checkLbl.textContent = c ? String(c.label || '') : '';
+        };
+        showCheck(check);
+        const icon = document.getElementById('customConfirmIcon');
+        if (icon) icon.style.display = danger ? '' : 'none';
+        if (ok) ok.classList.toggle('btn-red', !!danger);
         const matches = () => !word || (input && input.value.trim().toUpperCase() === word.toUpperCase());
         const sync = () => { if (ok) ok.disabled = !matches(); };
         sync();
         if (overlay) overlay.style.display = 'flex';
         if (word && input) setTimeout(() => input.focus(), 60);
+        let open = true;
+        if (later) {
+            Promise.resolve(later).then(c => { if (open && c) showCheck(c); }).catch(() => {});
+        }
         const onKey = e => {
             if (e.key === 'Escape') done(false);
             if (e.key === 'Enter' && matches()) done(true);
         };
         const done = (val) => {
+            open = false;
             if (overlay) overlay.style.display = 'none';
             if (ok)     { ok.onclick = null; ok.disabled = false; }
             if (cancel) cancel.onclick = null;
             if (input)  input.oninput  = null;
             if (wordEl) { wordEl.onclick = null; wordEl.textContent = word; }
             document.removeEventListener('keydown', onKey);
-            resolve(val && matches());
+            if (ok) ok.classList.remove('btn-red');
+            if (icon) icon.style.display = 'none';
+            resolve({ ok: !!(val && matches()),
+                      checked: !!(checkBox && checkBox.checked && checkWrap && checkWrap.style.display !== 'none') });
         };
         if (input)  input.oninput   = sync;
         if (wordEl) wordEl.onclick  = () => {
@@ -406,7 +445,7 @@ function _hideRestartOverlay() {
     if (el) el.style.display = 'none';
 }
 
-async function _waitForReconnect(immediate = false) {
+async function _waitForReconnect(immediate = false, onBack = null) {
     setTimeout(() => {
         const btn = document.getElementById('traefikRestartManualReload');
         if (btn) btn.style.display = 'inline-block';
@@ -432,7 +471,11 @@ async function _waitForReconnect(immediate = false) {
     while (true) {
         await new Promise(r => setTimeout(r, 1500));
         try {
-            if (await healthOk()) { location.reload(); return; }
+            if (await healthOk()) {
+                if (typeof onBack === 'function') { _hideRestartOverlay(); onBack(); }
+                else location.reload();
+                return;
+            }
         } catch(e) {}
     }
 }
@@ -758,14 +801,6 @@ function _scFile(path) {
     return `<span class="tm-cf" title="${_esc(path)}"><i class="ph-bold ph-file-code"></i>${_esc(name)}</span>`;
 }
 
-function _scRail(section, name) {
-    const nd = JSON.stringify(name);
-    return `<span class="tm-rail tm-rail-sm" onclick="event.stopPropagation()">` +
-        `<button type="button" class="tm-btn" title="Edit" onclick='event.stopPropagation();openStaticEditForm("${section}",${nd})'><i class="ph-bold ph-pencil-simple"></i></button>` +
-        `<button type="button" class="tm-btn" title="Delete" onclick='event.stopPropagation();removeStaticItem("${section}",${nd})'><i class="ph-bold ph-trash"></i></button>` +
-        '</span>';
-}
-
 function _scRowRail(section, name, glyphs) {
     const g = (glyphs || []).map(([ic, cls, tip]) =>
         `<span class="sig-flag ${cls}" title="${_esc(tip)}"><i class="ph-bold ${ic}"></i></span>`).join('');
@@ -837,39 +872,6 @@ function _scEpRow(name, ep) {
     });
 }
 
-function _tmEpCard(name, ep) {
-    const addr  = ep.address || '';
-    const redir = ep.http?.redirections?.entryPoint?.to || '';
-    const uhs   = _epHeaderStrategyValue(ep);
-    const tips  = Array.isArray(ep.forwardedHeaders?.trustedIPs) ? ep.forwardedHeaders.trustedIPs.length : 0;
-    const isUdp = /\/udp$/i.test(addr);
-    const isTcp = /\/tcp$/i.test(addr);
-    const port  = addr.replace(/\/(tcp|udp)$/i, '').replace(/^.*:/, '');
-    const proto = isUdp ? ['UDP', '#e2c041'] : isTcp ? ['TCP', 'var(--teal)']
-                : port === '443' ? ['HTTPS', 'var(--green)'] : ['HTTP', 'var(--blue)'];
-    const glyphs = (ep.http3 ? '<i class="ph-bold ph-lightning tm-glyph" style="color:var(--purple)" title="HTTP/3 enabled"></i>' : '')
-        + (tips ? `<i class="ph-bold ph-shield tm-glyph" style="color:var(--blue)" title="forwardedHeaders.trustedIPs: ${tips} range(s)"></i>` : '')
-        + (uhs ? `<i class="ph-bold ph-shield-check tm-glyph" style="color:var(--green)" title="${_epHeaderStrategyKey()}: ${_esc(uhs)}"></i>` : '');
-    const vals = redir
-        ? `<div class="tm-vals"><div class="tm-val tm-val-target"><i class="ph-bold ph-arrow-u-up-right"></i><span class="tm-v">redirects to ${_esc(redir)}</span></div></div>`
-        : '';
-    const meta = [
-        `<span class="d-flat" style="color:${proto[1]}">${proto[0]}${port ? ' ' + _esc(port) : ''}</span>`,
-        tips ? `${tips} trusted range${tips > 1 ? 's' : ''}` : '',
-        uhs ? _esc(uhs) : '',
-    ].filter(Boolean).join('<span class="tm-sep"> \u00b7 </span>');
-    return `<div class="tm-card tm-card-flat" style="--tm-accent:${proto[1]}">
-        <div class="tm-head">
-            <span class="tm-ic tm-ic-tile"><i class="ph-bold ph-door-open"></i></span>
-            <div class="tm-head-txt">
-                <div class="tm-title"><span class="tm-name">${_esc(name)}</span>${glyphs}</div>
-            </div>${_scRail('entrypoints', name)}
-        </div>
-        ${vals}
-        <div class="tm-foot"><span class="tm-meta">${meta}</span></div>
-    </div>`;
-}
-
 function _scResolverRow(name, res) {
     const acme   = (res || {}).acme || {};
     const isDns  = !!acme.dnsChallenge;
@@ -892,24 +894,6 @@ function _scResolverRow(name, res) {
     });
 }
 
-function _tmResolverCard(name, res) {
-    const acme  = (res || {}).acme || {};
-    const isDns = !!acme.dnsChallenge, isHttp = !!acme.httpChallenge;
-    const kind  = isDns ? `DNS challenge \u00b7 ${acme.dnsChallenge.provider || '?'}` : isHttp ? 'HTTP challenge' : 'TLS challenge';
-    const accent = isDns ? 'var(--blue)' : isHttp ? 'var(--orange)' : 'var(--green)';
-
-    return `<div class="tm-card tm-card-flat" style="--tm-accent:${accent}">
-        <div class="tm-head">
-            <span class="tm-ic tm-ic-tile"><i class="ph-bold ph-certificate"></i></span>
-            <div class="tm-head-txt">
-                <div class="tm-title"><span class="tm-name">${_esc(name)}</span></div>
-                <div class="tm-sub">${_esc(kind)}</div>
-            </div>${_scRail('resolvers', name)}
-        </div>
-        <div class="tm-foot"><span class="tm-meta">${acme.email ? _esc(acme.email) : 'no account email'}</span>${_scFile(acme.storage || 'acme.json')}</div>
-    </div>`;
-}
-
 function _scPluginRow(name, p) {
     const pl = p || {};
     const local = !!pl._local;
@@ -922,23 +906,6 @@ function _scPluginRow(name, p) {
             : [['ph-package', 'd-mw', pl.moduleName || name]],
         sub: local ? 'local plugin' : (pl.moduleName || ''),
     });
-}
-
-function _tmPluginCard(name, p) {
-    const vals = p.moduleName
-        ? `<div class="tm-vals"><div class="tm-val"><i class="ph-bold ph-package"></i><span class="tm-v" title="${_esc(p.moduleName)}">${_esc(p.moduleName)}</span>${_tmCopy(p.moduleName)}</div></div>`
-        : '';
-    return `<div class="tm-card tm-card-flat" style="--tm-accent:var(--purple)">
-        <div class="tm-head">
-            <span class="tm-ic tm-ic-tile"><i class="ph-bold ph-puzzle-piece"></i></span>
-            <div class="tm-head-txt">
-                <div class="tm-title"><span class="tm-name">${_esc(name)}</span></div>
-                <div class="tm-sub">${p._local ? 'local plugin' : _esc(p.version || 'no version pinned')}</div>
-            </div>${_scRail('plugins', name)}
-        </div>
-        ${vals}
-        <div class="tm-foot"><span class="tm-meta">${p._local ? 'plugins-local directory' : 'declared in traefik.yml'}</span></div>
-    </div>`;
 }
 
 function _renderStaticEntrypoints(eps) {
@@ -1071,7 +1038,7 @@ function _renderStaticVerdict(d) {
         return;
     }
     const items = shown.map(([ic, txt, sec]) =>
-        `<button type="button" class="sig-flag d-warn" onclick="_scJump('${sec}')" title="Go to ${_esc(sec)}">`
+        `<button type="button" class="sig-flag d-warn" onclick="_scJump(${_jsArg(sec)})" title="Go to ${_esc(sec)}">`
         + `<i class="ph-bold ${ic}"></i><span class="sig-fl">${_esc(txt)}</span></button>`).join('');
     el.innerHTML = '<div class="sig-verdict" data-health="warn">'
         + '<i class="ph-fill ph-warning-circle sig-verdict-ic"></i>'
@@ -1336,7 +1303,7 @@ function _scProviderRow(key, label, on, addr, count, glyphs, warn) {
         `<span class="sig-flag ${cls}" title="${_esc(tip)}"><i class="ph-bold ${ic}"></i></span>`).join('');
     const n = count === null || count === undefined ? ''
         : (count === 0 ? '<span style="color:var(--muted);font-weight:400">-</span>' : _sdNum(count));
-    return `<div class="sig-ep-row"${health} role="button" tabindex="0" onclick="_scToggleProvider('${key}')">`
+    return `<div class="sig-ep-row"${health} role="button" tabindex="0" onclick="_scToggleProvider(${_jsArg(key)})">`
         + `<span class="sig-ep-id"><span class="sig-ep-name">${_esc(label)}</span>`
         + `<span class="sig-idle-txt" style="color:${on ? 'var(--green)' : 'var(--muted)'}">${on ? 'enabled' : 'disabled'}</span></span>`
         + `<span class="sig-ep-addr">${_esc(addr || '')}</span>`
@@ -1564,7 +1531,7 @@ function _buildStaticTabHTML() {
 function _scSectionHead(key, label, icon, color, countId, addLabel) {
     const count = countId ? `<span class="d-n sc-count" id="${countId}">0</span>` : '';
     const add = addLabel
-        ? `<div class="flex gap-1 p-1 rounded-lg" style="background:var(--input-bg);border:1px solid var(--border)"><button onclick="openStaticAddForm('${key}')" class="proto-btn text-xs px-3 py-1.5" title="Add ${addLabel}"><i class="ph-bold ph-plus"></i></button></div>`
+        ? `<div class="flex gap-1 p-1 rounded-lg" style="background:var(--input-bg);border:1px solid var(--border)"><button onclick="openStaticAddForm(${_jsArg(key)})" class="proto-btn text-xs px-3 py-1.5" title="Add ${addLabel}"><i class="ph-bold ph-plus"></i></button></div>`
         : '';
     return `<div class="sc-sec-head" id="scHead-${key}"><i class="ph-bold ${icon} sc-sec-icon" style="color:${color}"></i><span class="sc-sec-label">${label}</span>${count}<span class="sc-sec-rule"></span>${add}</div>`;
 }
@@ -1624,7 +1591,7 @@ function toggleStaticFold(key) {
 
 function _scFoldHead(key, label, icon, color, countId) {
     const count = countId ? `<span class="d-n sc-count" id="${countId}">0</span>` : '';
-    return `<button type="button" class="sc-fold-head" onclick="toggleStaticFold('${key}')">`
+    return `<button type="button" class="sc-fold-head" onclick="toggleStaticFold(${_jsArg(key)})">`
         + `<i class="ph-bold ph-caret-right sc-fold-caret"></i>`
         + `<i class="ph-bold ${icon} sc-sec-icon" style="color:${color}"></i>`
         + `<span class="sc-sec-label">${label}</span>${count}`
@@ -2212,7 +2179,7 @@ function _buildStaticClassicHTML() {
 
 function _scNotice(key, title, body) {
     return `<div class="sc-notice rounded-lg" id="scNotice-${key}" style="background:rgba(59,130,246,0.07);border:1px solid rgba(59,130,246,0.2)">
-        <button type="button" onclick="toggleStaticNote('${key}')" class="w-full px-4 py-2.5 flex items-center gap-2 text-left" style="background:none;border:none;cursor:pointer">
+        <button type="button" onclick="toggleStaticNote(${_jsArg(key)})" class="w-full px-4 py-2.5 flex items-center gap-2 text-left" style="background:none;border:none;cursor:pointer">
             <i class="ph-bold ph-info text-sm shrink-0" style="color:var(--blue)"></i>
             <span class="text-xs font-semibold flex-1" style="color:var(--text)">${title}</span>
             <i class="ph-bold ph-caret-right sc-notice-caret text-xs" style="color:var(--muted)"></i>

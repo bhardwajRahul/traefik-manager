@@ -6,14 +6,15 @@ import shutil
 import subprocess
 import time
 
-from core import agents_http, env, notifications
+from core import agents_http, backups, env, notifications
 from core import settings as settings_mod
 from core.env import logger
 
 _GIT_ALLOWED_SCHEMES = ('https://', 'http://', 'ssh://', 'git://')
 _GIT_PROTO_HARDENING = ['-c', 'protocol.ext.allow=never',
                         '-c', 'protocol.file.allow=user',
-                        '-c', 'protocol.fd.allow=user']
+                        '-c', 'protocol.fd.allow=user',
+                        '-c', 'credential.helper=']
 
 
 def _git_repo_dir():
@@ -37,7 +38,7 @@ def _git_askpass_path() -> str:
         os.chmod(p, 0o700)
     return p
 
-def _git_run(args, cwd=None, credentials=None):
+def _git_run(args, cwd=None, credentials=None, extra_config=None):
     env = os.environ.copy()
     env['GIT_TERMINAL_PROMPT'] = '0'
     env['GIT_AUTHOR_NAME'] = 'Traefik Manager'
@@ -51,7 +52,7 @@ def _git_run(args, cwd=None, credentials=None):
     else:
         env['GIT_ASKPASS'] = ''
     result = subprocess.run(
-        ['git'] + _GIT_PROTO_HARDENING + args,
+        ['git'] + _GIT_PROTO_HARDENING + [part for item in (extra_config or []) for part in ('-c', item)] + args,
         cwd=cwd or _git_repo_dir(),
         capture_output=True,
         text=True,
@@ -148,9 +149,18 @@ def _git_push_configs(action='backup', custom_message=None):
                 _git_run(['reset', '--hard', 'FETCH_HEAD'])
             os.makedirs(dyn_dir,    exist_ok=True)
             os.makedirs(static_dir, exist_ok=True)
+            keys = backups.config_keys()
             for p in env.CONFIG_PATHS:
+                if env.is_own_state(p):
+                    logger.warning(f"Not pushing {os.path.basename(p)}: it holds Traefik Manager's own settings, not Traefik config")
+                    continue
+                dest = os.path.join(dyn_dir, *keys[p].split('/'))
+                if not os.path.realpath(dest).startswith(os.path.realpath(dyn_dir) + os.sep):
+                    logger.warning(f"Not pushing {p}: its backup name leaves the dynamic folder")
+                    continue
                 if os.path.exists(p):
-                    shutil.copy2(p, os.path.join(dyn_dir, os.path.basename(p)))
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    shutil.copy2(p, dest)
             sp = settings_mod._get_static_config_path()
             if sp and os.path.exists(sp):
                 shutil.copy2(sp, os.path.join(static_dir, os.path.basename(sp)))

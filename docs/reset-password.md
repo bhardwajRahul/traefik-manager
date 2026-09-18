@@ -111,7 +111,9 @@ SETTINGS_PATH=/var/lib/traefik-manager/manager.yml \
 :::
 
 ::: warning Temporary passwords only
-This form also sets `setup_password_reset: true` in `manager.yml`, which leaves `/setup` open to anyone who can reach Traefik Manager until you use it. Set your new password promptly. The flag clears on any password change and on your next successful login. `--prompt`, `--stdin` and `--password` never set it.
+This form also sets `setup_password_reset: true` in `manager.yml`, which leaves `/setup` open to anyone who can reach Traefik Manager until you use it. Set your new password promptly. The flag clears on any password change and on your next successful sign-in, by password, two-factor or OIDC. With two-factor on, the reset page also asks for a current code. With `ADMIN_PASSWORD` set, or local login turned off, the page refuses and clears the flag. `--prompt`, `--stdin` and `--password` never set it.
+
+Every reset signs out all browser sessions.
 :::
 
 ---
@@ -125,6 +127,8 @@ Use this if you cannot exec into the container (e.g. the container won't start).
 ```yaml
 setup_password_reset: true
 ```
+
+If two-factor is on and you no longer have the authenticator, also set `otp_enabled: false`, since the reset page asks for a current code.
 
 **2. Restart:**
 
@@ -202,6 +206,8 @@ setup_complete: true
 ```
 
 Restart the container - no wizard, no forced change, log in immediately with the password you set.
+
+Browsers signed in before the change stay signed in unless you also raise `session_epoch` by one.
 
 See [manager.yml reference](manager-yml.md) for all available fields.
 

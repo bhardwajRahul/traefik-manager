@@ -8,7 +8,7 @@ async function refreshFileExternalTab() {
     try {
         const [routerRes, managedNames, mwRes] = await Promise.all([
             agentFetch('/api/traefik/routers').then(r => r.json()),
-            fetch('/api/manager/router-names').then(r => r.json()),
+            fetch('/api/manager/router-names' + (_activeAgent ? '?server=' + encodeURIComponent(_activeAgent.id) : '')).then(r => r.json()),
             agentFetch('/api/traefik/middlewares').then(r => r.json()).catch(() => ({})),
         ]);
 

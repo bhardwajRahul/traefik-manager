@@ -1,20 +1,38 @@
 # Running on Unraid
 
-Traefik Manager installs on Unraid from a custom template hosted at [unraid.xyzlab.dev/tm](https://unraid.xyzlab.dev/tm).
+Traefik Manager and its agent are both in Community Applications. The templates are kept in [chr0nzz/unraid-templates](https://github.com/chr0nzz/unraid-templates).
+
+| App | Install it when |
+|---|---|
+| [traefik-manager](https://ca.unraid.net/apps/traefik-manager-07006dq0obycuq) | Traefik runs on this Unraid server and you want to manage it here |
+| [traefik-manager-agent](https://ca.unraid.net/apps/traefik-manager-agent-0hwaq5u1sy2tzy) | Traefik runs on this server but you manage it from a Traefik Manager on another machine. See [Agent](agent.md) |
 
 ---
 
-## Install via Community Applications
+## Install from Community Applications
 
-1. Open the **Apps** tab in your Unraid dashboard
-2. Click the **Settings** icon (top right) and go to **Template Repositories**
-3. Add this URL to your repository list:
-   ```
-   https://unraid.xyzlab.dev/tm
-   ```
-4. Click **Save**, then **Done**
-5. Search for **Traefik Manager** in the Apps tab
-6. Click **Install**
+1. Open the **Apps** tab on your Unraid server
+2. Search for **traefik-manager** and click **Install**
+3. Fill in the fields below and click **Apply**
+
+For the agent, search for **traefik-manager-agent** instead. It has no UI: add the server in your Traefik Manager under **Settings → Agents** to generate an API key, then paste the key into the template.
+
+### Manual install
+
+Without the Apps tab, install the template by hand. Open a terminal on your Unraid server and run:
+
+```bash
+wget -O /boot/config/plugins/dockerMan/templates-user/my-traefik-manager.xml \
+  https://raw.githubusercontent.com/chr0nzz/unraid-templates/main/templates/traefik-manager.xml
+```
+
+For the agent, use `my-traefik-manager-agent.xml` and `templates/traefik-manager-agent.xml`. Then:
+
+1. Open the **Docker** tab and click **Add Container**
+2. Pick **traefik-manager** from the **Template** dropdown, under *User templates*
+3. Fill in the fields below and click **Apply**
+
+The template survives reboots and array stops because it lives on the flash drive. To update it later, run the same command again.
 
 
 ---
@@ -91,9 +109,11 @@ To enable the optional tabs, add path mappings in the Unraid template:
 
 | Tab | Host path | Container path | Mode |
 |---|---|---|---|
-| Certs | `/mnt/user/appdata/traefik/acme.json` | `/app/acme.json` | Read-only |
+| Certs | `/mnt/user/appdata/traefik/acme.json` | `/app/acme.json` | Read-only, or read-write to remove certificates |
 | Plugins + Static Config | `/mnt/user/appdata/traefik/traefik.yml` | `/app/traefik.yml` | Read-write |
 | Logs | `/mnt/user/appdata/traefik/logs/access.log` | `/app/logs/access.log` | Read-only |
+
+Read-only `acme.json` shows your certificates and marks the ones nothing uses. To also remove them from the Certs tab, set that mapping to read-write and pick a **Restart Method**. See [Certs tab](tab-certs.md#removing-a-certificate).
 
 For `traefik.yml` also set **Static Config Path** (`STATIC_CONFIG_PATH`) to `/app/traefik.yml` - unlike acme.json and access.log, that path has no built-in default. A read-only mount still lists plugins, but saving the static config or installing a plugin fails with a write error.
 
@@ -173,4 +193,4 @@ Traefik Manager needs to reach the Traefik API. The simplest way on Unraid is to
 
 ## Updating
 
-Click **Check for Updates** in the Unraid Docker tab. Traefik Manager follows semantic versioning - patch releases are safe to apply immediately. Check the [release notes](https://github.com/chr0nzz/traefik-manager/releases) before applying minor or major updates.
+Click **Check for Updates** in the Unraid Docker tab. That updates the image, not the template. If you used the manual install, re-run the `wget` above to pick up new fields added to the template, and the Docker tab will offer them on the next edit. Traefik Manager follows semantic versioning - patch releases are safe to apply immediately. Check the [release notes](https://github.com/chr0nzz/traefik-manager/releases) before applying minor or major updates.

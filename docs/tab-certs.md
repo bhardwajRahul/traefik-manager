@@ -9,7 +9,152 @@ The **Certs** tab shows TLS certificates managed by Traefik, read from two sourc
 
 A summary strip counts your certificates, how many expire within 7 and within 30 days, and when the next one expires. Each card below shows the main domain with the issuing resolver underneath (`file` for PEM certs), the first two additional SANs with a copy button each (the rest behind a `+N more`), and the expiry date with the days remaining coloured green, amber under 30 days, and red under 7.
 
-Certificates are **read-only** - they are issued and renewed automatically by Traefik. To revoke or force a renewal, do so via your Traefik configuration.
+Certificates are **read-only** unless you allow [removing a certificate](#removing-a-certificate). Traefik issues and renews them. To revoke or force a renewal, do so via your Traefik configuration.
+
+## Certificates nothing uses
+
+Traefik renews every certificate in `acme.json` whether or not a router still needs it, and it never removes the section belonging to a resolver you have deleted. Both show up here.
+
+| Flag | Meaning |
+|---|---|
+| `unused` | No router on this server serves a domain this certificate covers |
+| `no resolver` | The certificate resolver that issued it is not in the static config any more |
+
+A wildcard certificate counts as used when a router serves any name it covers, `*.example.com` for `app.example.com`. A certificate pre-issued through `tls.domains` on a route counts as used even though no rule names it, and so does the `defaultGeneratedCert` in `tls.stores`. Routes you have switched off still count, because turning one back on with its certificate deleted means a fresh issue.
+
+`unused` is only ever shown when the picture is complete. If Traefik's API did not answer for every protocol, a config file failed to parse, a router matches hosts by regular expression, or a catch-all router exists that any certificate could serve, the summary strip says so and no certificate is called unused. `no resolver` needs the static config mounted; without it no resolver is judged.
+
+## Removing a certificate
+
+Read-only until you allow it. Both steps below are needed, and until then nothing about removal appears in the interface.
+
+### 1. Mount `acme.json` read-write
+
+Change the `:ro` to `:rw`. This is the only change to the volume.
+
+:::tabs
+== Docker
+```yaml
+volumes:
+  - /path/to/traefik/acme.json:/app/acme.json:rw     # was :ro
+```
+
+== Podman
+```yaml
+volumes:
+  - /path/to/traefik/acme.json:/app/acme.json:rw,z   # was :ro,z
+```
+
+== Linux (systemd)
+```ini
+Environment=ACME_JSON_PATH=/etc/traefik/acme.json
+```
+
+Traefik Manager has to run as the user that owns `acme.json`. Do not use `setfacl` or `chmod`: any group or other permission, an ACL entry included, makes Traefik refuse the file. See [Linux](linux.md#acme-json).
+:::
+
+### 2. Set a restart method
+
+::: tip Already using the Static Config editor?
+Then you already have a restart method and this step is done. Step 1 is the only change you need.
+:::
+
+Traefik reads `acme.json` once at startup and rewrites the whole file whenever it saves, so a removal without a restart is undone the next time that happens. Traefik Manager will not offer the button without one.
+
+:::tabs
+== Socket proxy (recommended)
+
+Traefik Manager talks to a small proxy that only exposes container restart, so it never sees the full Docker socket. Add both services:
+
+```yaml
+services:
+  traefik-manager:
+    environment:
+      - RESTART_METHOD=proxy
+      - TRAEFIK_CONTAINER=traefik
+      - DOCKER_HOST=tcp://socket-proxy:2375
+    networks:
+      - traefik-net
+      - socket-proxy-net
+
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket-proxy-net
+
+networks:
+  socket-proxy-net:
+    internal: true
+```
+
+`CONTAINERS: 1` and `POST: 1` are the only permissions needed. The `internal: true` network keeps the proxy off the internet.
+
+== Poison pill
+
+No socket access at all. Traefik Manager touches a file on a shared volume and Traefik restarts itself.
+
+```yaml
+services:
+  traefik-manager:
+    environment:
+      - RESTART_METHOD=poison-pill
+      - SIGNAL_FILE_PATH=/signals/restart.sig
+    volumes:
+      - traefik-signals:/signals
+
+volumes:
+  traefik-signals:
+```
+
+Traefik needs the matching healthcheck and the same volume, see [Static config](static.md#restart-methods).
+
+== Direct socket
+
+Simplest, and the broadest access: Traefik Manager can reach any container on the host.
+
+```yaml
+services:
+  traefik-manager:
+    environment:
+      - RESTART_METHOD=socket
+      - TRAEFIK_CONTAINER=traefik
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+```
+:::
+
+The trade-offs are covered in full under [Static config](static.md#restart-methods).
+
+### Removing
+
+Each ACME certificate then gets a remove button. The selection button in the toolbar turns on checkboxes for removing several at once, with **Select unused** for the common case. A whole batch costs one Traefik restart.
+
+Removing takes a timestamped backup of `acme.json` first, edits the file in place so a bind mount stays attached, keeps the mode at `600`, leaves the ACME account untouched, and restarts Traefik. Every store is checked before any is changed. If Traefik rewrites the file while a removal is in progress, nothing is written and you are asked to try again. Deleting a route offers to remove its certificate at the same time, when no other route still needs it.
+
+::: warning Deleting a certificate a route still needs re-issues it
+Traefik requests a fresh certificate for any domain a router still serves. Let's Encrypt allows five identical certificates per week, so repeated removals of the same domains can lock you out until that window clears.
+:::
+
+Every removal is listed under **Settings - Backups - Certificates**, and restoring one puts that copy of `acme.json` back and restarts Traefik. Retention follows the same setting as the other backups. When two stores share a file name, their backups carry the store's folder name, so each restores into its own store.
+
+This works on agents too. The agent needs its own read-write `acme.json` mount and its own `RESTART_METHOD`; the Certs tab reads that from the agent rather than assuming.
+
+## Filtering
+
+| Filter | Shows |
+|---|---|
+| Domain | Certificates covering that registered domain, wildcards included |
+| Unused | Certificates no router on this server serves |
+| No resolver | Certificates issued by a resolver that is gone from the static config |
+| Expiring | Expired, or expiring within 30 days |
+
+Search matches the main domain and every SAN. The domain list is built from the store and hides itself when everything sits under one domain.
 
 ## Enabling the tab
 
@@ -23,7 +168,7 @@ Go to **Settings - System Monitoring - Tab Visibility** and enable Certs.
 
 ### ACME certificates (acme.json)
 
-Point traefik-manager at your `acme.json` with the `ACME_JSON_PATH` environment variable (default: `/app/acme.json`), or with the acme.json Path field under **Settings - System Monitoring - File Paths**, which wins over the env var. Mount it read-only (`:ro`) - traefik-manager never writes to `acme.json`.
+Point traefik-manager at your `acme.json` with the `ACME_JSON_PATH` environment variable (default: `/app/acme.json`), or with the acme.json Path field under **Settings - System Monitoring - File Paths**, which wins over the env var. Mount it read-only (`:ro`) to view certificates and see which of them nothing uses. To also remove them, follow [Removing a certificate](#removing-a-certificate) above, which needs a read-write mount and a restart method.
 
 :::tabs
 == Docker / Podman
@@ -36,6 +181,8 @@ volumes:
 ```ini
 Environment=ACME_JSON_PATH=/etc/traefik/acme.json
 ```
+
+Run Traefik Manager as the user that owns `acme.json`, see [Linux](linux.md#acme-json).
 :::
 
 #### Several storage files

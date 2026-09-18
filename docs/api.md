@@ -440,6 +440,53 @@ List TLS certificates from ACME (`acme.json`) and from `tls.certificates` entrie
 
 When nothing could be read, the response also carries an `error` string.
 
+### Restoring a certificate store
+
+`POST /api/restore/<filename>` also accepts an `acme.json` backup, which `GET /api/backups` reports with `kind: certs`. It writes the file back in place, keeps mode `600` and restarts Traefik, and answers `403` when the mount is read only or no restart method is set. When two stores share a file name, their backups carry the store's folder, for example `a-acme.json.20260914_101010.bak`, and restore into that store. An older backup that matches more than one store answers `409`.
+
+### `GET /api/certs/manage`
+
+Whether this server can remove certificates from `acme.json`. Pass `?server=<agent-id>` for an agent.
+
+| Field | Description |
+|---|---|
+| `available` | `acme.json` is writable and a restart method is configured |
+| `writable` | The mount is read-write |
+| `restart_method` | The configured method, empty when there is none |
+| `reason` | Why it is not available |
+| `paths` | acme.json files that would be edited |
+
+### `POST /api/certs/delete`
+
+Remove certificate entries from `acme.json` and restart Traefik. Requires `available` above.
+
+```json
+{ "server": "", "certs": [{ "resolver": "letsencrypt", "main": "old.example.com" }] }
+```
+
+Answers `{"ok": true, "removed": 1, "backup": "acme.json.20260912_191028.bak", "restarted": true}`. `403` when the mount is read-only or no restart method is set; `404` when nothing matched.
+
+### `GET /api/certs/usage`
+
+Which certificates nothing uses, and which were issued by a resolver that no longer exists. Pass `?server=<agent-id>` for an agent; without it the Host is analysed. Repeat `?exclude=<route-id>` to answer as if those routes were already deleted.
+
+```json
+{ "certs": [ ... ], "unused_known": true, "why": "", "resolvers_known": true }
+```
+
+| Field | Description |
+|---|---|
+| `certs[].main` | Primary domain, matching `/api/traefik/certs` |
+| `certs[].resolver` | ACME resolver name, or `file` |
+| `certs[].source` | acme.json file the certificate came from |
+| `certs[].expired` | Already past its expiry |
+| `certs[].unused` | No router serves a domain it covers. Always `false` when `unused_known` is `false` |
+| `certs[].orphaned` | Its resolver is not in the static config. Always `false` when `resolvers_known` is `false` |
+| `certs[].why` | Why this certificate could not be judged |
+| `unused_known` | Whether unused could be determined at all |
+| `why` | Why it could not, when `unused_known` is `false` |
+| `resolvers_known` | Whether the static config could be read |
+
 ---
 
 ### `GET /api/traefik/logs`
@@ -449,6 +496,8 @@ Tail Traefik access logs. Requires an access log path, from `ACCESS_LOG_PATH` or
 | Query param | Default | Max |
 |---|---|---|
 | `lines` | `100` | `1000` |
+
+`lines` must be a positive whole number, otherwise the request answers `400`.
 
 ```json
 { "lines": ["..."] }
@@ -591,7 +640,7 @@ Get current application settings. Every secret is stripped. Five come back as a 
 
 Update settings. Full replace, not a patch: `domains` is required (`400` without it) and any omitted field resets to its default, so send the current values you want to keep.
 
-Exceptions: `git_backup_*`, `backup_keep_count`, `default_theme` and `notification_channels` are updated only when present, and blank `traefik_api_password`, `crowdsec_api_key`, `crowdsec_machine_password`, `webhook_password` and `git_backup_token` keep the stored secret.
+Exceptions: `git_backup_*`, `backup_keep_count`, `default_theme` and `notification_channels` are updated only when present, and blank `traefik_api_password`, `crowdsec_api_key`, `crowdsec_machine_password`, `webhook_password` and `git_backup_token` keep the stored secret. A blank `traefik_api_password` is refused with `400` when `traefik_api_url` moves to a different host, port or path, so the stored password is never sent somewhere new.
 
 Returns `{ "success": true, "settings": { ... } }` with secrets stripped. `400` for a missing domain, an invalid `traefik_api_url`, an unsupported `git_backup_repo` scheme, a `crowdsec_alert_limit` that is not a whole number ("Alert limit must be a whole number") or one outside 0-100000 ("Alert limit must be between 0 and 100000").
 
@@ -640,7 +689,7 @@ Known keys: `dashboard`, `routemap`, `docker`, `kubernetes`, `swarm`, `nomad`, `
 
 ### `POST /api/settings/test-connection`
 
-Test connectivity to a Traefik API URL before saving. Accepts optional credentials for auth-protected dashboards.
+Test connectivity to a Traefik API URL before saving. Accepts optional credentials for auth-protected dashboards. Without `password`, the saved credentials are sent only when `url` matches the saved Traefik API URL.
 
 ```json
 { "url": "http://traefik:8080", "user": "admin", "password": "secret" }
@@ -789,6 +838,8 @@ List all backup files, newest first. `kind` is `static` for backups of `traefik.
 
 Create a manual backup of every loaded config file. Returns `{ "success": true, "names": ["dynamic.yml.20260324_220000.bak"], "count": 1 }`, or `400` when there is nothing to back up.
 
+Config files that share a name carry their folder in the backup name, for example `one__routes.yml.20260324_220000.bak`, and restore into that file. An older backup that matches more than one file answers `409`.
+
 ---
 
 ### `POST /api/restore/{filename}`
@@ -857,7 +908,7 @@ Test repository credentials without pushing, via `git ls-remote`. Falls back to 
 { "repo_url": "https://github.com/you/configs", "username": "you", "token": "ghp_..." }
 ```
 
-Returns `{ "ok": true }`, or `400` with the git error. Tokens are redacted from the message.
+Returns `{ "ok": true }`, or `400` with the git error. Tokens are redacted from the message. Link-local, multicast and reserved targets are refused, and redirects are not followed.
 
 ---
 
@@ -1086,11 +1137,17 @@ field, without attempting delivery. A delivery failure returns `200` with `ok: f
 
 ### `POST /api/auth/change-password`
 
-Change the login password. Rate-limited to 10/min. The new password must be at least 8 characters and at most 72 bytes, which is the bcrypt limit. `403` if `current_password` is wrong.
+Change the login password. Rate-limited to 10/min. The new password must be at least 8 characters and at most 72 bytes, which is the bcrypt limit. `403` if `current_password` is wrong. Every other browser session is signed out; the caller stays signed in.
 
 ```json
 { "current_password": "...", "new_password": "...", "confirm_password": "..." }
 ```
+
+---
+
+### `POST /api/auth/sessions/revoke`
+
+Sign out every other browser session. The caller stays signed in, and API keys keep working.
 
 ---
 
@@ -1679,7 +1736,7 @@ Delete a template. Succeeds even if the id does not exist.
 
 ### `GET /api/crowdsec/decisions`
 
-List active CrowdSec decisions (bans, captchas, bypasses). Expired ones are filtered out. Pass `?full=1` to force a full stream refresh instead of an incremental one.
+List active CrowdSec decisions (bans, captchas, bypasses). Expired ones are filtered out. Pass `?full=1` to force a full stream refresh instead of an incremental one. This is the whole list, 56,000 rows on a host with the community blocklist; the UI reads `/api/crowdsec/summary` and `/api/crowdsec/decisions/search` instead.
 
 `503` when no LAPI URL is configured, or when there is no bouncer API key and no client certificate - `/v1/decisions` refuses the machine token. `502` when the LAPI cannot be reached.
 
@@ -1700,9 +1757,58 @@ List active CrowdSec decisions (bans, captchas, bypasses). Expired ones are filt
 
 ---
 
+### `GET /api/crowdsec/summary`
+
+Everything the CrowdSec tab draws, in one small response: decision counts, the decisions added by hand, and the retained alerts trimmed to the fields the UI uses. `?version=<v>` returns `{ "version": "<v>", "unchanged": true }` when nothing changed since that version, so a background refresh costs one tiny request. `?full=1` forces a full resync of both caches.
+
+`503` when no LAPI URL is configured. Every other failure is reported inside the block it belongs to with `ok: false` and `error`, so a bouncer key without a machine login still gets decisions and a machine login without a bouncer key still gets alerts.
+
+| Field | Notes |
+|-------|-------|
+| `version` | Changes when the active decision set or the alert set changes |
+| `decisions.ok`, `decisions.error`, `decisions.stale` | `stale` carries the same text as the `X-CS-Stale` header when the cache is served stale |
+| `decisions.total`, `own`, `subscribed`, `wide` | Active decisions, the ones not from CAPI or lists, and the Range or Country scoped ones |
+| `decisions.origins`, `decisions.types` | Counts keyed by lowercase origin and type |
+| `decisions.rows`, `decisions.rows_more` | Decisions added by hand or from an unknown origin, newest first, at most 500 |
+| `alerts.ok`, `alerts.error`, `alerts.status` | `status` is the upstream HTTP code |
+| `alerts.limit`, `alerts.capped` | The alert limit and whether the read hit it |
+| `alerts.rows` | Alerts trimmed to `id`, `uuid`, `scenario`, `scenario_version`, `events_count`, `capacity`, `leakspeed`, `simulated`, `machine_id`, `message`, `start_at`, `stop_at`, `created_at`, `source`, `meta`, plus `handled` when decisions were read |
+
+```json
+{
+  "version": "3f9c1d2e8a7b6c5d",
+  "decisions": { "ok": true, "error": "", "stale": "", "total": 56358, "own": 4, "subscribed": 56354, "wide": 0,
+                 "origins": { "crowdsec": 4, "capi": 56354 }, "types": { "ban": 56358 }, "rows": [], "rows_more": 0 },
+  "alerts": { "ok": true, "error": "", "status": 200, "limit": 500, "capped": false,
+              "rows": [{ "id": 4, "scenario": "crowdsecurity/http-probing", "source": { "ip": "1.2.3.4" }, "handled": true }] }
+}
+```
+
+---
+
+### `GET /api/crowdsec/decisions/search`
+
+One page of active decisions, filtered on the server. Same errors as `GET /api/crowdsec/decisions`.
+
+| Query | Notes |
+|-------|-------|
+| `q` | Substring match over value, scenario, origin, scope and type |
+| `origin` | `subscribed` (CAPI and lists), `own` (everything else), `byhand` (cscli and manual), or a literal origin |
+| `type`, `ip`, `scenario` | Exact match |
+| `page`, `per` | Page from 1, `per` 1-200, default 20 |
+
+Own decisions come first, then newest first. `facet_totals.origin` and `facet_totals.type` count the rows matching only that filter plus `q`, which is what the filter chips show.
+
+```json
+{ "rows": [{ "id": 1, "value": "1.2.3.4", "type": "ban", "origin": "cscli" }],
+  "total": 123, "page": 1, "pages": 7, "per": 20, "facet_totals": { "origin": 500, "type": 123 } }
+```
+
+---
+
 ### `GET /api/crowdsec/alerts`
 
-List recent CrowdSec alerts. The default cap is 500, configurable with the `crowdsec_alert_limit` setting or `CROWDSEC_ALERT_LIMIT`; the applied cap is returned in the `X-CS-Alert-Limit` header, and `X-CS-Alert-Capped` is `1` when the result hit it.
+List recent CrowdSec alerts. The default cap is 500, configurable with the `crowdsec_alert_limit` setting or `CROWDSEC_ALERT_LIMIT`; the applied cap is returned in the `X-CS-Alert-Limit` header, and `X-CS-Alert-Capped` is `1` when the result hit it. Served from a cache that is refreshed with the LAPI's `since` filter and fully resynced hourly; `?full=1` forces the full resync.
 
 **Response**
 

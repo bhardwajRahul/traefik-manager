@@ -49,9 +49,9 @@ export default defineConfig({
       },
       { text: 'Security', link: '/security' },
       {
-        text: 'v1.13.5',
+        text: 'v1.14.0',
         items: [
-          { text: 'v1.13.5', link: 'https://github.com/chr0nzz/traefik-manager/releases/tag/v1.13.5' },
+          { text: 'v1.14.0', link: 'https://github.com/chr0nzz/traefik-manager/releases/tag/v1.14.0' },
           { text: 'All releases', link: 'https://github.com/chr0nzz/traefik-manager/releases' },
         ],
       },
@@ -122,6 +122,7 @@ export default defineConfig({
           { text: 'ZooKeeper', link: '/tab-zookeeper' },
           { text: 'HTTP Provider', link: '/tab-http_provider' },
           { text: 'File (External)', link: '/tab-file_external' },
+          { text: 'Internal', link: '/tab-internal' },
         ],
       },
       {

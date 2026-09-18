@@ -6,7 +6,7 @@
 
 **A clean, self-hosted web UI for your Traefik reverse proxy.**
 
-Routes, middlewares, certificates and logs, without editing YAML by hand.
+Routes, middlewares, Services, Plugins, certificates, crowdsec and logs, without editing YAML by hand.
 
 [![Version](https://img.shields.io/github/v/release/chr0nzz/traefik-manager)](https://github.com/chr0nzz/traefik-manager/releases)
 [![Build](https://img.shields.io/github/actions/workflow/status/chr0nzz/traefik-manager/docker.yml?logo=githubactions&logoColor=white&label=build)](https://github.com/chr0nzz/traefik-manager/actions/workflows/docker.yml)
@@ -71,7 +71,7 @@ Open **http://your-server:5000** and the setup wizard takes it from there.
 
 ## Features
 
-**Routes** - HTTP, TCP and UDP. Multiple domains and backends per route, sticky sessions, health checks, priority, per-route certificate resolvers, wildcard certificates and TLS profiles. Guided presets for security headers and media streaming.
+**Routes** - HTTP, TCP and UDP. Multiple domains and backends per route, each with its own scheme including `h2c` for cleartext HTTP/2, sticky sessions, health checks, priority, per-route certificate resolvers, editable `tls.domains` and TLS profiles. Guided presets for security headers and media streaming.
 
 **Services** - build a load balancer, weighted, mirroring or failover service on its own, or balance a route across a mix of raw addresses and existing services with a weight on each row. Services Traefik Manager did not write stay read only until you take them over, which records ownership without touching the file.
 
@@ -79,13 +79,15 @@ Open **http://your-server:5000** and the setup wizard takes it from there.
 
 **Dashboard and Route Map** - a homepage-style grid of your apps with icons and health, and a topology map from entry point through middlewares to backend, coloured per hop.
 
-**Monitoring** - live router and service health from the Traefik API, provider tabs for Docker, Kubernetes, Swarm, Nomad, ECS, Consul, Redis and more, TLS expiry tracking, and CVE advisories for your running Traefik version.
+**Certificates** - every certificate in `acme.json`, with expiry, the ones no router serves, and the ones whose resolver is gone from your static config. Filter by domain or by either of those. Mount the file read-write and set a restart method to remove them, one at a time or in bulk, with a timestamped backup you can restore.
+
+**Monitoring** - live router and service health from the Traefik API, provider tabs for Docker, Kubernetes, Swarm, Nomad, ECS, Consul, Redis and more, which switch themselves on the first time Traefik reports routers from them, and CVE advisories for your running Traefik version.
 
 **Logs and CrowdSec** - access log analytics and CrowdSec attacks, bans and decisions. Optional country flags and a world map, resolved on your own server.
 
 **Notifications** - nine destinations: Discord, Slack, ntfy, Gotify, Pushover, Pushbullet, Telegram, UnifiedPush and generic webhooks. Route events to each one by category and severity, with quiet hours, hourly or daily digests, and errors that break through anyway. Desktop notifications while a tab is open.
 
-**Background monitoring** - certificate expiry, Traefik and agent reachability, CrowdSec activity, GeoIP freshness and new releases are checked on a schedule by the server, so alerts arrive whether or not the interface is open.
+**Background monitoring** - the server checks your routes on a schedule and tells you when a backend goes down or a pool degrades, alongside certificate expiry, Traefik and agent reachability, CrowdSec activity, GeoIP freshness and new releases. Alerts arrive whether or not the interface is open.
 
 **Static config editor** - edit `traefik.yml` from the UI and apply it with a one-click restart, via socket proxy, poison pill or direct socket.
 
@@ -113,7 +115,7 @@ Full [documentation](https://traefik-manager.xyzlab.dev/).
 | <img src="https://cdn.jsdelivr.net/gh/selfhst/icons@main/png/docker.png" width="20" height="20"> Docker              | [Compose, networking, behind Traefik](https://traefik-manager.xyzlab.dev/docker.html) |
 | <img src="https://cdn.jsdelivr.net/gh/selfhst/icons@main/png/podman.png" width="20" height="20"> Podman              | [Rootless, Quadlet, SELinux](https://traefik-manager.xyzlab.dev/podman.html)          |
 | <img src="https://cdn.jsdelivr.net/gh/selfhst/icons@main/png/linux.png" width="20" height="20"> Linux                | [Native Python and systemd](https://traefik-manager.xyzlab.dev/linux.html)            |
-| <img src="https://cdn.jsdelivr.net/gh/selfhst/icons@main/png/unraid.png" width="20" height="20"> Unraid              | [Community Applications template](https://traefik-manager.xyzlab.dev/unraid.html)     |
+| <img src="https://cdn.jsdelivr.net/gh/selfhst/icons@main/png/unraid.png" width="20" height="20"> Unraid              | [Community Applications and appdata paths](https://traefik-manager.xyzlab.dev/unraid.html) |
 | <img src="docs/public/images/icon.png" width="20" height="20"> Agent                                                 | [TMA for multi-server management](https://traefik-manager.xyzlab.dev/agent.html)      |
 
 ---
@@ -173,7 +175,7 @@ Native Android, rewritten in Kotlin and Jetpack Compose for v2. Needs Traefik Ma
 | Agent | Go 1.25 · Alpine |
 | Config | ruamel.yaml, preserving comments and Go templates |
 | Auth | bcrypt · pyotp · CSRF · Flask-Limiter · Fernet |
-| Frontend | Vanilla JS · Tailwind 3.4 · Phosphor Icons · Monaco |
+| Frontend | Vanilla JS · Tailwind 3.4 · Phosphor Icons · Monaco · Twemoji country flags (CC-BY 4.0) |
 | Geolocation | maxminddb · DB-IP Lite, local lookups only |
 | Tests | pytest · ruff · `go test`, on every pull request |
 

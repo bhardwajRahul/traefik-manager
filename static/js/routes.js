@@ -170,26 +170,61 @@ function setServiceRefMode(proto, on, opts) {
     if (typeof currentProto !== 'undefined' && currentProto === proto) setProtocol(proto);
 }
 
+let _inflightServicesList = null;
+
 async function _ensureServicesList() {
-    if (window._tmServices) return window._tmServices;
-    try {
-        const url = _activeAgent ? '/api/agents/' + _activeAgent.id + '/routes' : '/api/routes';
-        const res = await fetch(url, { headers: { 'X-Requested-With': 'fetch' } });
-        const data = await res.json();
-        window._tmServices = data.services || { http: [], tcp: [], udp: [] };
-    } catch (e) {
-        window._tmServices = { http: [], tcp: [], udp: [] };
-    }
-    return window._tmServices;
+    const have = window._tmServices;
+    if (have && have.liveLoaded) return have;
+    if (_inflightServicesList) return _inflightServicesList;
+    const server = _activeAgent ? _activeAgent.id : '';
+    _inflightServicesList = (async () => {
+        const out = Object.assign({ http: [], tcp: [], udp: [], live: { http: [], tcp: [], udp: [] }, liveLoaded: false },
+                                  window._tmServices || {});
+        const jobs = [agentFetch('/api/traefik/services').then(r => r.json()).then(live => {
+            ['http', 'tcp', 'udp'].forEach(pr => {
+                out.live[pr] = (live[pr] || []).map(sv => ({
+                    name: String(sv.name || ''),
+                    provider: sv.provider || String(sv.name || '').split('@')[1] || ''
+                })).filter(sv => sv.name && sv.provider && sv.provider !== 'file');
+            });
+            out.liveLoaded = true;
+        }).catch(() => {})];
+        if (!window._tmServices) {
+            const url = _activeAgent ? '/api/agents/' + _activeAgent.id + '/routes' : '/api/routes';
+            jobs.push(fetch(url, { headers: { 'X-Requested-With': 'fetch' } }).then(r => r.json()).then(data => {
+                const own = data.services || {};
+                ['http', 'tcp', 'udp'].forEach(pr => { out[pr] = own[pr] || []; });
+            }).catch(() => {}));
+        }
+        await Promise.all(jobs);
+        if ((_activeAgent ? _activeAgent.id : '') === server) window._tmServices = out;
+        return out;
+    })();
+    _inflightServicesList.catch(() => {}).then(() => { _inflightServicesList = null; });
+    return _inflightServicesList;
 }
 
 async function _populateServiceRefSelect(proto, selected) {
     const sel = _svcRefSelect(proto);
     if (!sel) return;
-    const svcs = (await _ensureServicesList())[proto] || [];
-    sel.innerHTML = svcs.map(n => `<option value="${_esc(n)}">${_esc(n)}</option>`).join('');
-    if (selected && !svcs.includes(selected)) {
-        sel.insertAdjacentHTML('afterbegin', `<option value="${_esc(selected)}">${_esc(selected)}</option>`);
+    const data = await _ensureServicesList();
+    const own  = data[proto] || [];
+    const live = ((data.live || {})[proto] || []);
+    const groups = {};
+    live.forEach(sv => { (groups[sv.provider] = groups[sv.provider] || []).push(sv.name); });
+    if (proto === 'http' && !(groups.internal || []).includes('noop@internal')) {
+        groups.internal = (groups.internal || []).concat('noop@internal');
+    }
+    const opt = n => `<option value="${_esc(n)}">${_esc(n)}</option>`;
+    let html = own.length ? `<optgroup label="This config">${own.map(opt).join('')}</optgroup>` : '';
+    Object.keys(groups).sort().forEach(pr => {
+        const names = [...new Set(groups[pr])].sort();
+        html += `<optgroup label="${_esc(pr)} (read only)">${names.map(opt).join('')}</optgroup>`;
+    });
+    sel.innerHTML = html;
+    const known = own.concat(live.map(sv => sv.name)).concat(groups.internal || []);
+    if (selected && !known.includes(selected)) {
+        sel.insertAdjacentHTML('afterbegin', opt(selected));
     }
     if (selected) sel.value = selected;
     _updateRefTarget(proto);
@@ -440,8 +475,7 @@ function _applyStreamingPreset(on) {
     _renderStreamingState(!!on);
 }
 
-async function openModal() {
-    _routeWasComposite = false;
+function _resetRouteForm() {
     closeOtherPanels('appModal');
     document.getElementById('isEdit').value = 'false';
     document.getElementById('modalTitle').innerText = 'Add Route';
@@ -453,13 +487,6 @@ async function openModal() {
         if (el) el.value = '';
     });
     setHttpRuleMode('simple');
-    await Promise.all([
-        _initEntrypointChips('http', []),
-        _initEntrypointChips('tcp', []),
-        _initEntrypointChips('udp', []),
-        _initMiddlewareChips([]),
-        _initMiddlewareChips([], 'tcp')
-    ]);
     setTcpTlsMode('none', document.getElementById('tcpTlsNone'));
     const crHttp = document.getElementById('certResolver');
     if (crHttp) { crHttp.value = (!_activeAgent && availableCertResolvers.length > 0) ? availableCertResolvers[0] : '__disabled__'; toggleWildcardSection(crHttp.value); }
@@ -468,22 +495,66 @@ async function openModal() {
     const wcChk = document.getElementById('wildcardCheckbox'); if (wcChk) wcChk.checked = false;
     const mainEl = document.getElementById('tlsWildcardMain'); if (mainEl) mainEl.value = '';
     const sansEl = document.getElementById('tlsWildcardSans'); if (sansEl) sansEl.value = '';
+    _showWildcardFields(false);
     ['http', 'tcp', 'udp'].forEach(pr => setServiceRefMode(pr, false));
-    await _ensureServicesList();
-    ['http', 'tcp', 'udp'].forEach(pr => _populateServiceRefSelect(pr, ''));
     setProtocol('http');
     _resetHeadersPreset();
     _resetStreamingPreset();
     const tlsOptSel = document.getElementById('tlsOptionsProfileSelect');
     if (tlsOptSel) tlsOptSel.value = '';
-    _populateTlsOptionsSelect();
     _updateRouteModalForAgent();
     _initDomainChips([]);
+}
+
+let _routeFillToken = 0;
+
+async function _fillRouteSelects(app, proto, opts) {
+    const token = ++_routeFillToken;
+    const fresh = () => token === _routeFillToken;
+    const lock  = !!(opts && opts.lock);
+    const ownedHdr = (app && app.headersPreset && app.headersPreset.owned) ? app.name + '-headers' : null;
+    const mwsFor = pr => (app && pr === proto) ? (app.middlewares || []).filter(m => m !== ownedHdr) : [];
+    const epsFor = pr => (app && pr === proto) ? (app.entryPoints || []) : [];
+    const step = fn => Promise.resolve().then(fn).catch(e => console.error('Route form load failed:', e));
     await Promise.all([
-        _populateConfigFileSelect('route'),
-        _loadAgentResolversIntoSelects()
+        step(async () => {
+            const data = await _ensureServicesList();
+            if (!fresh()) return;
+            const ref = app ? _detectServiceRef(app, proto, data[proto] || []) : { refMode: false, raw: '' };
+            await Promise.all(['http', 'tcp', 'udp'].map(pr => _populateServiceRefSelect(pr, (pr === proto && ref.refMode) ? ref.raw : '')));
+            if (!fresh()) return;
+            ['http', 'tcp', 'udp'].forEach(pr => { if (pr !== proto) setServiceRefMode(pr, false); });
+            if (app) setServiceRefMode(proto, ref.refMode, lock ? { lockManual: ref.refMode } : undefined);
+        }),
+        step(async () => {
+            await _initMiddlewareChips(mwsFor('http'));
+            if (fresh() && app && proto === 'http') _applyHeadersPreset(app.headersPreset);
+        }),
+        step(() => _initMiddlewareChips(mwsFor('tcp'), 'tcp')),
+        step(() => _initEntrypointChips('http', epsFor('http'))),
+        step(() => _initEntrypointChips('tcp', epsFor('tcp'))),
+        step(() => _initEntrypointChips('udp', epsFor('udp'))),
+        step(async () => {
+            await _populateTlsOptionsSelect();
+            const sel = document.getElementById('tlsOptionsProfileSelect');
+            if (fresh() && sel) sel.value = app ? (app.tlsOptionsProfile || '') : '';
+        }),
+        step(async () => {
+            await _populateConfigFileSelect('route');
+            if (!fresh() || !app || !app.configFile) return;
+            const cfSel = document.getElementById('configFileSelect');
+            if (cfSel) cfSel.value = app.configFile;
+            document.getElementById('configFile').value = app.configFile;
+        }),
+        step(() => _loadAgentResolversIntoSelects()),
     ]);
+}
+
+async function openModal() {
+    _routeWasComposite = false;
+    _resetRouteForm();
     _openRoutePanel();
+    await _fillRouteSelects(null, 'http');
 }
 
 function _openRoutePanel() {
@@ -578,10 +649,31 @@ async function saveRouteAjax(event) {
     }
 }
 
+async function _routeCertOption(ids) {
+    if (typeof _certsForRoutes !== 'function') return null;
+    try {
+        const certs = await _certsForRoutes(ids);
+        if (!certs.length) return null;
+        const names = certs.map(c => c.main);
+        return { certs, label: (names.length === 1
+                 ? 'Also remove its certificate for ' + names[0]
+                 : 'Also remove their ' + names.length + ' certificates')
+                 + ', and restart Traefik so the change sticks' };
+    } catch (e) { return null; }
+}
+
 async function deleteRoute(id, configFile) {
     const shown = String(id).includes('::') ? String(id).split('::').slice(1).join('::') : String(id);
     const where = configFile ? ' from ' + configFile : '';
-    if (!await _confirm('Delete route "' + shown + '"' + where + '? This removes it from the config file and stops serving it.', 'Delete Route', 'Delete', 'DELETE')) return;
+    const pending = _routeCertOption([id]);
+    const answer = await _confirmWith({
+        message: 'Delete route "' + shown + '"' + where + '? This removes it from the config file and stops serving it.',
+        title: 'Delete Route', okLabel: 'Delete', typeWord: 'DELETE',
+        checkboxAsync: pending.then(c => c ? { label: c.label, checked: false } : null),
+    });
+    if (!answer.ok) return;
+    const certOpt   = await pending;
+    const alsoCerts = answer.checked && certOpt ? certOpt.certs : null;
     const data = new FormData();
     data.append('csrf_token', document.querySelector('meta[name="csrf-token"]')?.content || '');
     if (configFile) data.append('configFile', configFile);
@@ -591,7 +683,11 @@ async function deleteRoute(id, configFile) {
         if (!res.ok) { showToast(await _errText(res, 'Error deleting route'), 'error'); return; }
         const json = await res.json();
         showToast(json.message || json.error || 'Error deleting route', json.ok ? 'success' : 'error');
-        if (json.ok) { refreshRoutes(); fetchNotifications(); if (typeof window.rmInvalidateData === 'function') window.rmInvalidateData(); }
+        if (json.ok) {
+            refreshRoutes(); fetchNotifications();
+            if (typeof window.rmInvalidateData === 'function') window.rmInvalidateData();
+            if (alsoCerts && typeof removeCerts === 'function') await removeCerts(alsoCerts, { confirmed: true });
+        }
     } catch(e) { showToast(_netErrText(e, 'Error deleting route'), 'error'); }
 }
 
@@ -631,7 +727,21 @@ function _clearRouteViews(message) {
     if (message) showToast(message, 'error');
 }
 
+function _paintRoutes(data) {
+    if (data.services) {
+        const prev = window._tmServices || {};
+        window._tmServices = Object.assign({ live: prev.live || { http: [], tcp: [], udp: [] }, liveLoaded: !!prev.liveLoaded },
+                                           data.services);
+    }
+    renderRouteGrid(data.apps || []);
+    renderMwGrid(data.middlewares || []);
+    loadOverviewStats();
+    _renderConfigErrorBanner(data.configErrors || []);
+}
+
 async function refreshRoutes() {
+    if (typeof _dropConfigFilesCache === 'function') _dropConfigFilesCache();
+    tabCacheHydrate('routes', _paintRoutes);
     try {
         let res;
         if (_activeAgent) {
@@ -644,11 +754,9 @@ async function refreshRoutes() {
             return;
         }
         const data = await res.json();
-        if (data.services) window._tmServices = data.services;
-        renderRouteGrid(data.apps || []);
-        renderMwGrid(data.middlewares || []);
-        loadOverviewStats();
-        _renderConfigErrorBanner(data.configErrors || []);
+        _paintRoutes(data);
+        tabCachePut('routes', { apps: data.apps || [], middlewares: data.middlewares || [],
+                                services: data.services || null, configErrors: data.configErrors || [] });
     } catch(e) {
         console.error('refreshRoutes failed:', e);
         _clearRouteViews(_netErrText(e, 'Could not load routes'));
@@ -892,7 +1000,7 @@ function renderRouteGrid(apps) {
     const _allAppsForRender = apps;
     const _tmOn = _routeViewMode !== 'list';
     const _tmCfShow = _tmOn ? _tmFolderMode(apps) : false;
-    grid.innerHTML = apps.map((app, i) => {
+    const _rowsHtml = apps.map((app, i) => {
         if (_tmOn) return _tmRouteCard(app, i, { showCf: _tmCfShow });
         const proto = app.protocol || 'http';
         const allDomains = [...(app.rule || '').matchAll(/Host\(`([^`]+)`\)/g)].map(m => m[1]);
@@ -950,11 +1058,13 @@ function renderRouteGrid(apps) {
     if (_routeViewMode === 'list') {
         const header = `<div class="svc-list-header route-list-grid"><div>Status</div><div>Protocol</div><div>Name</div><div>Service</div><div>Domain / Rule</div><div>Target</div><div>Entry Points</div><div>Middlewares</div><div class="rl-actions-head">Actions</div></div>`;
         grid.className = '';
-        grid.innerHTML = `<div class="svc-list">${header}${grid.innerHTML}</div>`;
+        grid.innerHTML = `<div class="svc-list">${header}${_rowsHtml}</div>`;
     } else if (_tmOn) {
         grid.className = 'tm-card-grid';
+        grid.innerHTML = _rowsHtml;
     } else {
         grid.className = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4';
+        grid.innerHTML = _rowsHtml;
     }
     _routeCardEls = Array.from(grid.querySelectorAll('.route-card'));
     if (typeof _sdApplyRouteCards === 'function') _sdApplyRouteCards();
@@ -1146,7 +1256,7 @@ async function _initEntrypointChips(proto, selectedEntrypoints) {
     const eps = (epList || []).map(e => e.name || e).filter(Boolean);
     const isSingle = proto === 'udp';
     if (!eps.length) {
-        container.innerHTML = `<input type="text" id="${hiddenId}_fallback" class="input-field" placeholder="${proto === 'http' ? 'https' : proto}" style="flex:1" oninput="document.getElementById('${hiddenId}').value=this.value">`;
+        container.innerHTML = `<input type="text" id="${hiddenId}_fallback" class="input-field" placeholder="${proto === 'http' ? 'https' : proto}" style="flex:1" oninput="document.getElementById(${_jsArg(hiddenId)}).value=this.value">`;
         hidden.value = selectedEntrypoints ? (isSingle ? (selectedEntrypoints[0] || '') : selectedEntrypoints.join(', ')) : (proto === 'http' ? 'https' : '');
         return;
     }
@@ -1166,7 +1276,7 @@ async function _initEntrypointChips(proto, selectedEntrypoints) {
             const bgColor = on ? (isOrphan ? 'rgba(234,179,8,0.12)' : 'rgba(34,197,94,0.12)') : 'transparent';
             const textColor = on ? (isOrphan ? 'var(--yellow,#eab308)' : 'var(--green)') : 'var(--muted)';
             const titleAttr = isOrphan ? `${_esc(ep)} (not found in Traefik entrypoints - click to remove)` : _esc(ep);
-            return `<button type="button" onclick="_toggleEpChip(this,${_jsArg(ep)},'${proto}')" style="padding:3px 10px;border-radius:6px;border:1px solid ${borderColor};background:${bgColor};color:${textColor};font-size:12px;font-family:monospace;cursor:pointer" title="${titleAttr}">${_esc(ep)}</button>`;
+            return `<button type="button" onclick="_toggleEpChip(this,${_jsArg(ep)},${_jsArg(proto)})" style="padding:3px 10px;border-radius:6px;border:1px solid ${borderColor};background:${bgColor};color:${textColor};font-size:12px;font-family:monospace;cursor:pointer" title="${titleAttr}">${_esc(ep)}</button>`;
         }).join('');
     }
     render();
@@ -1210,7 +1320,7 @@ async function _initMiddlewareChips(selectedMiddlewares, proto) {
     });
     const mws = [...byBase.values()];
     if (!mws.length) {
-        container.innerHTML = `<input type="text" class="input-field" style="flex:1" placeholder="${proto === 'tcp' ? 'tcp-lan-only@file' : 'auth@file, redirect-https'}" oninput="document.getElementById('${hiddenId}').value=this.value">`;
+        container.innerHTML = `<input type="text" class="input-field" style="flex:1" placeholder="${proto === 'tcp' ? 'tcp-lan-only@file' : 'auth@file, redirect-https'}" oninput="document.getElementById(${_jsArg(hiddenId)}).value=this.value">`;
         hidden.value = selectedMiddlewares ? selectedMiddlewares.join(', ') : '';
         return;
     }
@@ -1229,7 +1339,7 @@ async function _initMiddlewareChips(selectedMiddlewares, proto) {
         const hiddenCount = all.length - unsel.length;
         const chip = (mw, i, on) => {
             const label = mw.split('@')[0];
-            return `<button type="button" onclick="_toggleMwChip(${_jsArg(mw)},'${proto}')" class="mw-chip${on ? ' on' : ''}" title="${_esc(mw)}">${on ? (i + 1) + '. ' : ''}${_esc(label)}</button>`;
+            return `<button type="button" onclick="_toggleMwChip(${_jsArg(mw)},${_jsArg(proto)})" class="mw-chip${on ? ' on' : ''}" title="${_esc(mw)}">${on ? (i + 1) + '. ' : ''}${_esc(label)}</button>`;
         };
         const divider = sel.length > 0 && unsel.length > 0
             ? `<span style="align-self:center;width:1px;height:18px;background:var(--border);margin:0 2px;flex-shrink:0"></span>`
@@ -1424,7 +1534,7 @@ function addBackendRow(proto, data) {
     row.className = 'tm-backend-row grid gap-3 mt-2';
     row.style.gridTemplateColumns = proto === 'http' ? '110px 1fr 1fr 32px' : '1fr 1fr 32px';
     const schemeCell = proto === 'http'
-        ? `<select class="input-field bk-scheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select>`
+        ? `<select class="input-field bk-scheme"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="h2c">h2c</option></select>`
         : '';
     const kindCell = proto === 'http'
         ? `<select class="input-field bk-kind text-sm" onchange="_bkKindChanged(this)"><option value="manual">IP : Port</option><option value="service">Service</option></select>`
@@ -1459,12 +1569,23 @@ function _clearBackendRows(proto) {
     if (wrap) wrap.innerHTML = '';
 }
 
+const _SCHEME_RE = /^(https?|h2c):\/\//i;
+
+function _schemeOf(url) {
+    const m = String(url || '').match(_SCHEME_RE);
+    return m ? m[1].toLowerCase() : 'http';
+}
+
+function _stripScheme(url) {
+    return String(url || '').replace(_SCHEME_RE, '');
+}
+
 function _splitServer(value, proto) {
     let v = String(value || '').trim();
     if (!v) return null;
     if (proto === 'http') {
-        const scheme = v.startsWith('https://') ? 'https' : 'http';
-        v = v.replace(/^https?:\/\//, '');
+        const scheme = _schemeOf(v);
+        v = v.replace(_SCHEME_RE, '');
         const i = v.lastIndexOf(':');
         return (i > -1 && !v.slice(i + 1).includes('/'))
             ? { scheme, host: v.slice(0, i), port: v.slice(i + 1) }
@@ -1648,11 +1769,18 @@ function toggleWildcardSection(resolverVal) {
     }
 }
 
+function _showWildcardFields(on) {
+    const box = document.getElementById('wildcardFields');
+    if (box) box.style.display = on ? '' : 'none';
+}
+
 function _onWildcardToggle(checked) {
     const mainEl = document.getElementById('tlsWildcardMain');
     const sansEl = document.getElementById('tlsWildcardSans');
+    _showWildcardFields(checked);
     if (!mainEl || !sansEl) return;
     if (!checked) { mainEl.value = ''; sansEl.value = ''; return; }
+    if (mainEl.value.trim() || sansEl.value.trim()) return;
     const domSel = document.getElementById('domainSelect');
     let base = '';
     if (window._domainChipSelected && window._domainChipSelected.size) {
@@ -1696,36 +1824,23 @@ function _applyHttpRuleToForm(rule) {
 
 async function cloneRoute(btn) {
     const app = JSON.parse(btn.getAttribute('data-app'));
-    await openModal();
+    _routeWasComposite = false;
+    _resetRouteForm();
     document.getElementById('modalTitle').innerText = 'Clone Route';
     document.getElementById('serviceName').value = (app.name || '') + '-copy';
     _populateBackends(app.protocol || 'http', app.servers);
     _applyLbAdvanced(app);
-    const cfSel = document.getElementById('configFileSelect');
-    if (app.configFile) {
-        document.getElementById('configFile').value = app.configFile;
-        if (cfSel) cfSel.value = app.configFile;
-    }
+    if (app.configFile) document.getElementById('configFile').value = app.configFile;
     const proto = app.protocol || 'http';
     setProtocol(proto);
-    const _cloneSvcList = (await _ensureServicesList())[proto] || [];
-    const _cloneRef = _detectServiceRef(app, proto, _cloneSvcList);
-    if (_cloneRef.refMode) {
-        await _populateServiceRefSelect(proto, _cloneRef.raw);
-        setServiceRefMode(proto, true);
-    }
     if (proto === 'http') {
         _applyHttpRuleToForm(app.rule || '');
         const _cloneComposite = !!app.serviceType && app.serviceType !== 'loadBalancer';
-        const targetScheme = (app.target || '').startsWith('https://') ? 'https' : 'http';
-        let target = _cloneComposite ? '' : (app.target || '').replace('http://','').replace('https://','');
+        const targetScheme = _schemeOf(app.target);
+        let target = _cloneComposite ? '' : _stripScheme(app.target);
         const parts = target.split(':');
         document.getElementById('targetIp').value = parts[0] || '';
         document.getElementById('targetPort').value = _cloneComposite ? '' : (parts[1] || '80');
-        const _ownedHdr = (app.headersPreset && app.headersPreset.owned) ? app.name + '-headers' : null;
-        await _initMiddlewareChips((app.middlewares || []).filter(m => m !== _ownedHdr));
-        _applyHeadersPreset(app.headersPreset);
-        await _initEntrypointChips('http', app.entryPoints || []);
         document.getElementById('scheme').value = targetScheme;
         document.getElementById('passHostHeader').checked = app.passHostHeader !== false;
         _applyStreamingPreset(app.streaming);
@@ -1747,21 +1862,16 @@ async function cloneRoute(btn) {
             const sansEl = document.getElementById('tlsWildcardSans');
             if (mainEl) mainEl.value = first.main || '';
             if (sansEl) sansEl.value = (first.sans || []).join('\n');
+            _showWildcardFields(true);
         } else if (chk) {
             chk.checked = false;
-        }
-        const tlsOptSel = document.getElementById('tlsOptionsProfileSelect');
-        if (tlsOptSel) {
-            await _populateTlsOptionsSelect();
-            tlsOptSel.value = app.tlsOptionsProfile || '';
+            _showWildcardFields(false);
         }
     } else if (proto === 'tcp') {
         document.getElementById('tcpRule').value = app.rule || '';
         const target = (app.target || '').split(':');
         document.getElementById('targetIpTcp').value = target[0] || '';
         document.getElementById('targetPortTcp').value = target[1] || '';
-        await _initEntrypointChips('tcp', app.entryPoints || []);
-        await _initMiddlewareChips(app.middlewares || [], 'tcp');
         const tlsMode = app.tls ? (app.tls.passthrough ? 'passthrough' : 'tls') : 'none';
         setTcpTlsMode(tlsMode, document.getElementById(tlsMode === 'passthrough' ? 'tcpTlsPassthrough' : tlsMode === 'tls' ? 'tcpTlsTls' : 'tcpTlsNone'));
         const crTcp = document.getElementById('certResolverTcp');
@@ -1770,8 +1880,9 @@ async function cloneRoute(btn) {
         const target = (app.target || '').split(':');
         document.getElementById('targetIpUdp').value = target[0] || '';
         document.getElementById('targetPortUdp').value = target[1] || '';
-        await _initEntrypointChips('udp', app.entryPoints || []);
     }
+    _openRoutePanel();
+    await _fillRouteSelects(app, proto, { lock: false });
 }
 
 let _routeMenuCard = null;
@@ -1830,24 +1941,13 @@ async function handleEdit(btn) {
     }
     _applyLbAdvanced(app);
 
-    const _svcList = (await _ensureServicesList())[proto] || [];
-    const _ref = _detectServiceRef(app, proto, _svcList);
-    ['http', 'tcp', 'udp'].forEach(pr => { if (pr !== proto) setServiceRefMode(pr, false); });
-    await _populateServiceRefSelect(proto, _ref.refMode ? _ref.raw : '');
-    setServiceRefMode(proto, _ref.refMode, { lockManual: _ref.refMode });
-
     if (proto === 'http') {
         _applyHttpRuleToForm(app.rule || '');
-
-        const targetScheme = (app.target || '').startsWith('https://') ? 'https' : 'http';
-        let target = app.target.replace('http://','').replace('https://','');
+        const targetScheme = _schemeOf(app.target);
+        let target = _stripScheme(app.target);
         const parts = target.split(':');
         document.getElementById('targetIp').value = parts[0];
         document.getElementById('targetPort').value = parts[1] || '80';
-        const _ownedHdr = (app.headersPreset && app.headersPreset.owned) ? app.name + '-headers' : null;
-        await _initMiddlewareChips((app.middlewares || []).filter(m => m !== _ownedHdr));
-        _applyHeadersPreset(app.headersPreset);
-        await _initEntrypointChips('http', app.entryPoints || []);
         document.getElementById('scheme').value = targetScheme;
         document.getElementById('passHostHeader').checked = app.passHostHeader !== false;
         _applyStreamingPreset(app.streaming);
@@ -1869,44 +1969,29 @@ async function handleEdit(btn) {
             const sansEl = document.getElementById('tlsWildcardSans');
             if (mainEl) mainEl.value = first.main || '';
             if (sansEl) sansEl.value = (first.sans || []).join('\n');
+            _showWildcardFields(true);
         } else if (wChk) {
             wChk.checked = false;
             _onWildcardToggle(false);
         }
-        const tlsOptSel2 = document.getElementById('tlsOptionsProfileSelect');
-        if (tlsOptSel2) {
-            await _populateTlsOptionsSelect();
-            tlsOptSel2.value = app.tlsOptionsProfile || '';
-        }
-
     } else if (proto === 'tcp') {
         document.getElementById('tcpRule').value = app.rule || '';
         const target = (app.target || '').split(':');
         document.getElementById('targetIpTcp').value = target[0] || '';
         document.getElementById('targetPortTcp').value = target[1] || '';
-        await _initEntrypointChips('tcp', app.entryPoints || []);
-        await _initMiddlewareChips(app.middlewares || [], 'tcp');
         const tlsMode2 = app.tls ? (app.tls.passthrough ? 'passthrough' : 'tls') : 'none';
         setTcpTlsMode(tlsMode2, document.getElementById(tlsMode2 === 'passthrough' ? 'tcpTlsPassthrough' : tlsMode2 === 'tls' ? 'tcpTlsTls' : 'tcpTlsNone'));
         const crTcp = document.getElementById('certResolverTcp');
         if (crTcp && app.certResolver) _ensureResolverOption(crTcp, app.certResolver);
-
     } else if (proto === 'udp') {
         const target = (app.target || '').split(':');
         document.getElementById('targetIpUdp').value = target[0] || '';
         document.getElementById('targetPortUdp').value = target[1] || '';
-        await _initEntrypointChips('udp', app.entryPoints || []);
     }
-
-    await _populateConfigFileSelect('route');
-    const cfSel = document.getElementById('configFileSelect');
-    if (app.configFile) {
-        if (cfSel) cfSel.value = app.configFile;
-        document.getElementById('configFile').value = app.configFile;
-    }
-    await _loadAgentResolversIntoSelects();
     _openRoutePanel();
+    await _fillRouteSelects(app, proto, { lock: true });
 }
+
 let _routeViewMode = tmPref('routeViewMode');
 let _bulkMode = false;
 let _bulkSelected = new Set();
@@ -1963,10 +2048,26 @@ async function bulkDisable() {
     _bulkSelected.clear(); updateBulkBar(); refreshRoutes();
 }
 
+function _routeNameList(ids, limit = 6) {
+    const pool  = window._lastRenderedApps || (typeof APP_DATA !== 'undefined' ? APP_DATA : []) || [];
+    const names = ids.map(id => (pool.find(a => String(a.id) === String(id)) || {}).name || id);
+    if (names.length <= limit) return names.join(', ');
+    return names.slice(0, limit).join(', ') + ` and ${names.length - limit} more`;
+}
+
 async function bulkDelete() {
     const ids = [..._bulkSelected];
     if (!ids.length) return;
-    if (!await _confirm(`Delete ${ids.length} route${ids.length > 1 ? 's' : ''}? This removes them from the config files and stops serving them.`, 'Bulk Delete', 'Delete', 'DELETE')) return;
+    const pending = _routeCertOption(ids);
+    const answer  = await _confirmWith({
+        message: `Delete ${ids.length} route${ids.length > 1 ? 's' : ''}: ${_routeNameList(ids)}? `
+                 + 'This removes them from the config files and stops serving them.',
+        title: 'Bulk Delete', okLabel: 'Delete', typeWord: 'DELETE',
+        checkboxAsync: pending.then(c => c ? { label: c.label, checked: false } : null),
+    });
+    if (!answer.ok) return;
+    const certOpt   = await pending;
+    const alsoCerts = answer.checked && certOpt ? certOpt.certs : null;
     const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
     let failed = 0, firstErr = '';
     for (const id of ids) {
@@ -1994,6 +2095,7 @@ async function bulkDelete() {
     else showToast(`Deleted ${ids.length} route${ids.length > 1 ? 's' : ''}.`, 'success');
     _bulkSelected.clear(); updateBulkBar(); refreshRoutes(); fetchNotifications();
     if (typeof window.rmInvalidateData === 'function') window.rmInvalidateData();
+    if (alsoCerts && typeof removeCerts === 'function') await removeCerts(alsoCerts, { confirmed: true });
 }
 
 function toggleRouteView() {
@@ -2001,7 +2103,8 @@ function toggleRouteView() {
     tmSetPref('routeViewMode', _routeViewMode);
     const icon = document.getElementById('routeViewIcon');
     if (icon) icon.className = _routeViewMode === 'grid' ? 'ph-bold ph-list' : 'ph-bold ph-squares-four';
-    refreshRoutes();
+    if (window._lastRenderedApps) renderRouteGrid(window._lastRenderedApps);
+    else refreshRoutes();
 }
 
 
@@ -2239,15 +2342,26 @@ function renderDetailPanel(app, protocol, liveRouter, liveService, entrypoints, 
     const svcServers = svcLoadBalancer ? (svcLoadBalancer.servers || []) : [{ url: app.target }];
     const svcPassHostHeader = svcLoadBalancer ? (svcLoadBalancer.passHostHeader !== false ? 'true' : 'false') : '-';
     const svcStatus = liveService ? (liveService.status || '-') : '-';
+    const svcServerStatus = (liveService && liveService.serverStatus && typeof liveService.serverStatus === 'object') ? liveService.serverStatus : null;
+    const svcChecked = !!(svcServerStatus && Object.keys(svcServerStatus).length && svcLoadBalancer && svcLoadBalancer.healthCheck);
+    const svcUp = svcServerStatus ? Object.values(svcServerStatus).filter(v => String(v).toUpperCase() === 'UP').length : 0;
+    const svcTotal = svcServerStatus ? Object.keys(svcServerStatus).length : 0;
 
-    const svcServerRows = svcServers.map((s, i) => [
-        `Server ${i + 1}`,
-        s.url || s.address || '-',
-        false
-    ]);
+    const svcServerRows = svcServers.map((s, i) => {
+        const url = s.url || s.address || '-';
+        const st = svcServerStatus ? svcServerStatus[url] : undefined;
+        if (st === undefined) return [`Server ${i + 1}`, url, false];
+        const up = String(st).toUpperCase() === 'UP';
+        return [`Server ${i + 1}`,
+            `<span class="d-state d-flat ${up ? 'd-on' : 'd-bad'}"><span class="status-dot ${up ? 'status-online' : 'status-offline'}"></span>${up ? 'UP' : 'DOWN'}</span> <span class="font-mono">${_esc(url)}</span>`,
+            true];
+    });
+    const svcHealthTxt = !svcChecked ? ''
+        : svcUp === svcTotal ? `<span class="text-xs ml-2" style="color:var(--muted)">${svcUp} of ${svcTotal} servers up</span>`
+        : `<span class="text-xs ml-2 font-semibold" style="color:${svcUp === 0 ? 'var(--red)' : 'var(--yellow)'}">${svcUp === 0 ? 'all' : svcTotal - svcUp + ' of'} ${svcTotal} servers down</span>`;
 
     const svcRows = [
-        ['Status', svcStatus !== '-' ? _dState(svcStatus === 'enabled' ? 'Enabled' : svcStatus) : '-', svcStatus !== '-'],
+        ['Status', svcStatus !== '-' ? _dState(svcStatus === 'enabled' ? 'Enabled' : svcStatus) + svcHealthTxt : '-', svcStatus !== '-'],
         ['Type', app.serviceType && app.serviceType !== 'loadBalancer' ? app.serviceType : 'Load Balancer', false],
         ['Pass Host Header', svcPassHostHeader, false],
         ...(app.containerAddr ? [['Container', app.containerAddr, false]] : []),

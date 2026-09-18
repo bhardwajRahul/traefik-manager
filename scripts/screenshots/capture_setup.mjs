@@ -2,6 +2,7 @@ import puppeteer from 'puppeteer';
 const BASE = 'http://tmshot-app:5000';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-dev-shm-usage', '--force-color-profile=srgb'] });
+const missing = [];
 
 const PANELS = [
     [0, 'setup-welcome'],
@@ -33,22 +34,30 @@ for (const theme of ['dark', 'light']) {
         throw new Error('setup wizard did not render its final panel');
     }
 
-    await js(`document.getElementById('s_apiurl').value = 'http://traefik:8080';
-              document.getElementById('s_domains').value = 'example.com, example.lan';
-              document.getElementById('s_resolver').value = 'letsencrypt';`);
+    const fill = async (fields) => {
+        const gone = await page.evaluate((pairs) => Object.entries(pairs).filter(([id, value]) => {
+            const el = document.getElementById(id);
+            if (!el) return true;
+            el.value = value;
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return false;
+        }).map(([id]) => id), fields);
+        gone.forEach(id => missing.push(`${theme}: #${id} is gone from the setup wizard`));
+    };
+
+    await fill({ s_apiurl: 'http://traefik:8080', s_domains: 'example.com, example.lan',
+                 s_resolver: 'letsencrypt' });
     await js(`['dashboard','routemap','certs','logs'].forEach(t => { if (!setupTabs[t]) toggleSetupTab(t); })`);
     await js(`if (!setupGeoip) toggleSetupGeoip()`);
-    await js(`document.getElementById('s_cs_url').value = 'http://crowdsec:8080';
-              document.getElementById('s_cs_key').value = 'a1b2c3d4e5f6a7b8c9d0';
-              document.getElementById('s_cs_machine_id').value = 'traefik-manager';
-              document.getElementById('s_cs_machine_pw').value = 'a1b2c3d4e5f6a7b8c9d0';`);
-    await js(`document.getElementById('s_git_repo').value = 'https://github.com/you/traefik-configs';
-              document.getElementById('s_git_user').value = 'you';
-              document.getElementById('s_git_token').value = 'ghp_a1b2c3d4e5f6a7b8c9d0';`);
-    await js(`document.getElementById('s_webhook_url').value = 'https://discord.com/api/webhooks/1234567890/aBcDeFgHiJkLmNoP';`);
-    await js(`document.getElementById('s_password').value = 'correct-horse-battery';
-              document.getElementById('s_confirm').value = 'correct-horse-battery';
-              checkPwMatch();`);
+    await fill({ s_cs_url: 'http://crowdsec:8080', s_cs_key: 'a1b2c3d4e5f6a7b8c9d0',
+                 s_cs_machine_id: 'traefik-manager', s_cs_machine_pw: 'a1b2c3d4e5f6a7b8c9d0' });
+    await fill({ s_git_repo: 'https://github.com/you/traefik-configs', s_git_user: 'you',
+                 s_git_token: 'ghp_a1b2c3d4e5f6a7b8c9d0' });
+    await fill({ s_notify_kind: 'discord' });
+    await sleep(400);
+    await fill({ s_notify_url: 'https://discord.com/api/webhooks/1234567890/aBcDeFgHiJkLmNoP' });
+    await fill({ s_password: 'correct-horse-battery', s_confirm: 'correct-horse-battery' });
+    await js(`if (typeof checkPwMatch === 'function') checkPwMatch()`);
 
     for (const [step, name] of PANELS) {
         await js(`goTo(${step})`);
@@ -59,3 +68,7 @@ for (const theme of ['dark', 'light']) {
     await ctx.close();
 }
 await browser.close();
+if (missing.length) {
+    console.log('SETUP WIZARD FIELDS THAT MOVED, the panels still shot but with empty fields:');
+    missing.forEach(m => console.log('  ! ' + m));
+}

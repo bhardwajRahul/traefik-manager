@@ -57,7 +57,7 @@ What would you like to install?
   3) Traefik Manager Agent
 ```
 
-**Traefik Manager only** then asks how to deploy it:
+**Traefik + Traefik Manager** and **Traefik Manager only** then both ask how to deploy:
 
 ```
 Deployment method
@@ -65,7 +65,15 @@ Deployment method
   2) Linux service (systemd)
 ```
 
-`tm install --mode <mode>` skips the menus: `full`, `tm-docker`, `tm-native`, `agent-docker`, `agent-docker-traefik`, `agent-binary`, or `agent` to pick only the agent method.
+| Answer | Mode | Documented as |
+|---|---|---|
+| Full stack, Docker | `full` | [Mode 1](#mode-1-traefik-traefik-manager-full-stack) |
+| Full stack, Linux service | `full-native` | [Mode 2](#mode-2-traefik-traefik-manager-linux-services) |
+| Traefik Manager only, Docker | `tm-docker` | [Mode 3](#mode-3-traefik-manager-only-docker) |
+| Traefik Manager only, Linux service | `tm-native` | [Mode 4](#mode-4-traefik-manager-only-linux-service) |
+| Traefik Manager Agent | `agent-docker`, `agent-docker-traefik`, `agent-binary` | [Mode 5](#mode-5-traefik-manager-agent) |
+
+`tm install --mode <mode>` skips the menus, taking any mode above, or `agent` to pick only the agent method.
 
 ---
 
@@ -96,10 +104,10 @@ The setup runs through numbered sections (General, Deployment type, Domain, TLS 
    8  Docker network      traefik-net  api:8080
   ────────────────────────────────────────────────────────
 
-  Edit a section (1-8) or Enter to install:
+  Edit a section, or Continue
 ```
 
-Type a section number to re-configure it, then press Enter with no number to install. Nothing is written to disk until you confirm.
+Pick a section to answer it again, or Continue to install. Nothing is written to disk until you continue.
 
 ### What the wizard configures
 
@@ -144,10 +152,13 @@ Your base domain and subdomains for:
 | Access logs | Yes | Logs tab in Traefik Manager |
 | SSL certs (`acme.json`) | Yes | Certs tab in Traefik Manager |
 | Traefik static config (`traefik.yml`) | No | Plugins tab + Static Config editor |
+| Certificate removal | No | Mounts `acme.json` read-write so the Certs tab can remove certificates. Asked when certs are mounted |
 
 **Docker network** - network name (default: `traefik-net`) and Traefik internal API port (default: `8080`)
 
 **Static config editor** - enabling the static config mount also asks which restart method to use (socket proxy, poison pill, or direct socket). `tm` then writes every required compose addition - socket proxy service, shared signal volume, Traefik healthcheck, env vars on TM - so the editor works out of the box. It covers entrypoints, certificate resolvers, providers, plugins, API, logging, observability and system settings, plus a raw YAML editor for anything else. See [Static Config Editor](static.md).
+
+**Certificate removal** - asks for the same restart method when the static config editor is off. See [Removing a certificate](tab-certs.md#removing-a-certificate).
 
 For an existing install that skipped it:
 
@@ -161,9 +172,33 @@ For an existing install that skipped it:
 | Install as part of this stack | Adds a `crowdsec` service, generates a random bouncer API key, writes `crowdsec/acquis.yaml` pointing at the Traefik access log, and sets `CROWDSEC_LAPI_URL` + `CROWDSEC_API_KEY` on Traefik Manager. |
 | Connect to existing instance | Prompts for the LAPI URL and bouncer key of a CrowdSec instance you already run, plus optional machine credentials for alerts and unban. No new service is added. |
 
-Choosing the install option turns the access log mount on automatically - CrowdSec needs it.
+Choosing the install option turns the access log mount on automatically - CrowdSec needs it. Both options then ask for the alert limit (0 to 100000, default 500), which becomes `CROWDSEC_ALERT_LIMIT`.
 
 Once installed, enable the **CrowdSec** tab under **Settings → System Monitoring → Tab Visibility** to view active decisions, recent alerts, and unban IPs.
+
+### CrowdSec bouncer plugin
+
+CrowdSec on its own detects. The bouncer is what blocks. After the CrowdSec questions `tm` offers to install the [Traefik bouncer plugin](https://github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin):
+
+| What | Detail |
+|---|---|
+| Offered when | CrowdSec is set to install or connect, and `tm` can write `traefik.yml`: this mode and the agent with Traefik, or any other mode with the static config mount set |
+| Declares | `experimental.plugins.crowdsec`, module `github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin`, version `v1.7.1` |
+| Writes | A `crowdsec` middleware in your dynamic config: `crowdsec.yml` in a config directory, or inlined in a single-file layout |
+| Middleware holds | `CrowdsecMode: live`, the LAPI scheme and host, and the bouncer key in plain text. Keep that file with the rest of your Traefik config |
+| Backup | An existing `traefik.yml` is copied to `traefik.yml.tm.bak` before the plugin block is added |
+
+`tm` never attaches the middleware to a router. Nothing is blocked until you add it yourself:
+
+```yaml
+  middlewares:
+    - crowdsec@file
+```
+
+Two things worth knowing:
+
+- If the plugin is already declared in `traefik.yml` under another alias, `tm` reuses it and changes nothing.
+- On an install where `tm` did not write `traefik.yml`, the plugin trusts the forwarded headers your entrypoints already trust. When none are set, the bouncer sees the address Traefik connects from and bans that instead of the real client. Set `forwardedHeaders.trustedIPs` on the entrypoint, then run `tm reconfigure`.
 
 ### Directory structure
 
@@ -219,7 +254,127 @@ Or directly with Compose from `~/traefik-stack`: `docker compose logs -f traefik
 
 ---
 
-## Mode 2 - Traefik Manager only (Docker)
+## Mode 2 - Traefik + Traefik Manager (Linux services)
+
+Installs Traefik and Traefik Manager as systemd services on the host. No Docker anywhere. Use this on a server that does not run containers, or where Traefik should be an ordinary system service.
+
+### Prerequisites
+
+- Python 3.11 or newer
+- `git`, `curl`
+- `systemd`
+- amd64, arm64 or armv7. `tm` downloads the Traefik release for that architecture
+- `sudo`, for the units, the service user, `/usr/local/bin/traefik`, `/etc/traefik`, `/var/lib/traefik` and `/var/log/traefik`
+
+`tm` refuses to install when the host already has a `traefik.service` it did not write. Install Traefik Manager beside it with `--mode tm-native` instead.
+
+### Sections and review screen
+
+Seven sections: General, Deployment type, TLS / Certificates, Domain, Dynamic config, Static config editor, CrowdSec.
+
+```
+  Review configuration
+  ────────────────────────────────────────────────────────
+   1  General              /opt/traefik-manager  data:/var/lib/traefik-manager  tm::5000  api::8080
+   2  Deployment type      external (internet-facing)
+   3  TLS / Certificates   Let's Encrypt HTTP challenge  you@example.com
+   4  Domain               example.com  dash:traefik.example.com
+   5  Dynamic config       Single file
+   6  Static config editor static editor on (restart:poison-pill)  cert removal on
+   7  CrowdSec             install (CrowdSec package)  bouncer plugin
+  ────────────────────────────────────────────────────────
+
+  Edit a section, or Continue
+```
+
+Nothing is written to disk until you pick Continue.
+
+### What the wizard configures
+
+| Section | Asks |
+|---|---|
+| General | Install directory (default `/opt/traefik-manager`), data directory (default `/var/lib/traefik-manager`), Traefik Manager port (default `5000`), Traefik internal API port (default `8080`) |
+| Deployment type | External (internet-facing) or internal only (LAN, VPN, Tailscale) |
+| TLS / Certificates | Same choices as mode 1: Let's Encrypt HTTP or DNS challenge, or no TLS |
+| Domain | Optional. Leave it empty for no dashboard route. Otherwise the dashboard subdomain (default `traefik.<domain>`) and whether to serve the Traefik dashboard UI |
+| Dynamic config | Single file (`/etc/traefik/dynamic/dynamic.yml`) or directory (`/etc/traefik/dynamic`). The paths are fixed |
+| Static config editor | Whether Traefik Manager may edit `/etc/traefik/traefik.yml`. With TLS on it also offers certificate removal |
+| CrowdSec | Install the CrowdSec package on this server, or connect to an existing instance |
+
+There is no restart method question. Either answer in the Static config editor section installs a `traefik-restart.path` watcher: Traefik Manager writes `/var/lib/traefik-manager/signals/restart.sig` and the watcher restarts Traefik. No Docker socket is involved.
+
+Unlike mode 1, Traefik Manager itself gets no hostname and no Traefik route. Reach it at `http://<server-ip>:5000`.
+
+### What tm installs
+
+- Downloads the latest Traefik release for this architecture, verifies its SHA-256, and installs `/usr/local/bin/traefik`. The version is recorded so `tm update` can compare
+- Creates the `traefik-manager` system user. Traefik and Traefik Manager both run as it, which is what makes certificate removal work here: `acme.json` stays mode 600 and is owned by the user that writes it
+- Writes `traefik.service` (with a systemd watchdog) and `traefik-manager.service`, plus `traefik-restart.path` and `traefik-restart.service` when a restart is needed
+- Adds `/etc/logrotate.d/traefik`, rotating the access log daily and keeping 14
+
+### Directory structure
+
+```
+/usr/local/bin/traefik         (binary, .prev kept after an update)
+/etc/traefik/
+- traefik.yml                  (static config)
+- dynamic/
+  - dynamic.yml                (single file layout)
+  - *.yml                      (directory layout)
+/var/lib/traefik/
+- acme.json                    (certificates, mode 600)
+- plugins-storage/
+/var/log/traefik/
+- access.log
+/opt/traefik-manager/          (the app, a git clone and its venv)
+/var/lib/traefik-manager/
+- manager.yml
+- backups/
+- signals/
+/etc/traefik-manager/
+- env                          (secrets, mode 600)
+- tm-state.yml                 (tm's record of the install)
+/etc/systemd/system/
+- traefik.service
+- traefik-manager.service
+- traefik-restart.path
+- traefik-restart.service
+```
+
+### Useful commands
+
+```bash
+tm status
+tm logs
+tm logs traefik
+tm doctor
+tm password
+tm restart
+```
+
+`tm restart` restarts both services; `tm restart traefik` takes one. With systemd directly: `sudo systemctl status traefik traefik-manager`, `sudo journalctl -u traefik-manager -f`.
+
+### Updating
+
+`tm update` pulls the app as the `traefik-manager` user, reinstalls dependencies, rebuilds the assets and restarts the service. It then checks for a newer Traefik release, keeps the old binary as `traefik.prev`, and rolls back to it if Traefik stops answering `/ping` within 30 seconds.
+
+### Uninstalling
+
+`tm uninstall` stops and removes the units, the Traefik binary and the install directory. It keeps `/etc/traefik`, `/var/lib/traefik`, `/var/log/traefik` and the data directory, so routes, certificates and logs survive. `tm uninstall --purge` removes those too and deletes the service user. An installed CrowdSec package is always left in place.
+
+### What this mode does not do
+
+| Not available | Instead |
+|---|---|
+| Traefik Manager behind Traefik with TLS | Reach it on its port, or add a route yourself |
+| Docker provider, container label routing | The file provider only |
+| A choice of restart method | Always the signal file watcher |
+| Configurable config, log and certificate paths | The paths above are fixed |
+| Several installs on one host | One, at fixed unit names and a fixed state file |
+
+---
+
+## Mode 3 - Traefik Manager only (Docker)
 
 Installs just Traefik Manager as a Docker container. Use this when Traefik is already running on your server.
 
@@ -228,7 +383,7 @@ Installs just Traefik Manager as a Docker container. Use this when Traefik is al
 Numbered sections (General, Network, Access, Dynamic config, Optional mounts) end with the same review table as the other modes:
 
 ```
-  Edit a section (1-5) or Enter to install:
+  Edit a section, or Continue
 ```
 
 ### What the wizard configures
@@ -251,12 +406,22 @@ Numbered sections (General, Network, Access, Dynamic config, Optional mounts) en
 | Access logs | Yes | Path to Traefik access log (default: `/var/log/traefik/access.log`) |
 | SSL certs (`acme.json`) | Yes | Path to `acme.json` (default: `/etc/traefik/acme.json`) |
 | Traefik static config | No | Path to `traefik.yml` (default: `/etc/traefik/traefik.yml`) |
+| Certificate removal | No | Asked when certs are mounted. Mounts `acme.json` read-write |
 
-**Static config editor** - mounting the static config also asks for the restart method (socket proxy, poison pill, or direct socket) and the Traefik container name (default: `traefik`).
+**Static config editor** - mounting the static config or allowing certificate removal also asks for the restart method (socket proxy, poison pill, or direct socket) and the Traefik container name (default: `traefik`).
 
 To add static config support later, either run `tm reconfigure --section mounts` (regenerates the compose file, preserving config and backups) or follow [Enable static config editor](static-enable.md).
 
-This mode does not ask about CrowdSec. Connect it after install under **Settings → System Monitoring → CrowdSec**, or set `CROWDSEC_LAPI_URL` and `CROWDSEC_API_KEY` in the compose file yourself.
+**CrowdSec IDS**
+
+| Option | What happens |
+|---|---|
+| Install alongside Traefik Manager (container) | Adds a `crowdsec` service, asks for the Traefik access log path and turns that mount on, generates a bouncer key, writes `crowdsec/acquis.yaml`, and sets `CROWDSEC_LAPI_URL` + `CROWDSEC_API_KEY` |
+| Connect to existing instance | Asks for the LAPI URL and bouncer key, plus optional machine credentials for alerts and unban |
+
+Both ask for the alert limit. The bouncer plugin is offered only when the static config mount is on, since the plugin is declared in `traefik.yml`. See [the bouncer plugin](#crowdsec-bouncer-plugin) under mode 1.
+
+To add CrowdSec to an existing install, run `tm add crowdsec`.
 
 ### Directory structure
 
@@ -289,7 +454,7 @@ tm password
 
 ---
 
-## Mode 3 - Traefik Manager only (Linux service)
+## Mode 4 - Traefik Manager only (Linux service)
 
 Installs Traefik Manager as a native systemd service. No Docker required. Use this when you run Traefik natively or prefer not to use containers.
 
@@ -304,7 +469,7 @@ Installs Traefik Manager as a native systemd service. No Docker required. Use th
 Numbered sections (General, Service user, Dynamic config, Optional mounts) end with the same review table as the other modes:
 
 ```
-  Edit a section (1-4) or Enter to install:
+  Edit a section, or Continue
 ```
 
 ### What the wizard configures
@@ -332,9 +497,24 @@ Numbered sections (General, Service user, Dynamic config, Optional mounts) end w
 
 Poison pill asks for the signal file path (default: `/var/lib/traefik-manager/signals/restart.sig`).
 
+Certificate removal is not offered in this mode. The service runs as a different user than Traefik, and Traefik refuses an `acme.json` that another user can write. Use a Docker mode for it.
+
 To add static config support later, either run `tm reconfigure --section mounts` (regenerates the systemd unit and restarts the service) or follow [Enable static config editor](static-enable.md) to add the env vars by hand.
 
-This mode does not ask about CrowdSec. Connect it after install under **Settings → System Monitoring → CrowdSec**, or add `CROWDSEC_LAPI_URL` and `CROWDSEC_API_KEY` to the unit file (`sudo systemctl edit traefik-manager`).
+**CrowdSec IDS**
+
+| Option | What happens |
+|---|---|
+| Install on this server (CrowdSec package) | Installs the CrowdSec package (the distro package on Arch, the CrowdSec repo script elsewhere), enables `crowdsec.service`, installs the `crowdsecurity/traefik` collection, registers a `traefik-manager` bouncer and a machine, and writes `/etc/crowdsec/acquis.d/traefik.yaml` pointing at your access log |
+| Connect to existing instance | Asks for the LAPI URL and bouncer key, plus optional machine credentials for alerts and unban |
+
+Both ask for the alert limit. Credentials go to `/etc/traefik-manager/env` (mode 600), the rest into the unit as `Environment=`.
+
+The LAPI listens on `127.0.0.1:8080`. To move it, set `crowdsec.lapi_port` in an answers file: the wizard does not ask for it. `tm` then writes `/etc/crowdsec/config.yaml.local` and `/etc/crowdsec/local_api_credentials.yaml.local` with that port. It refuses a port already in use, or one that clashes with the Traefik Manager port.
+
+The bouncer plugin is offered only when the static config mount is on. In a single-file dynamic config `tm` does not write the middleware, because it did not create that file: it prints the YAML for you to paste. See [the bouncer plugin](#crowdsec-bouncer-plugin) under mode 1.
+
+`tm uninstall` removes the acquis file and leaves the CrowdSec package installed.
 
 `tm` clones the repository, creates a Python venv, installs dependencies, builds the vendor assets and CSS, writes the systemd unit, and enables the service. Its record of the install is `/etc/traefik-manager/tm-state.yml`.
 
@@ -359,7 +539,7 @@ Or with systemd directly: `sudo systemctl status traefik-manager`, `sudo journal
 
 ---
 
-## Mode 4 - Traefik Manager Agent
+## Mode 5 - Traefik Manager Agent
 
 Installs the [TMA agent](agent.md) on a remote server so a central Traefik Manager can manage it. This mode does not install TM itself.
 
@@ -397,10 +577,10 @@ tm install --mode agent-docker --api-key <key> --traefik-url http://traefik:8080
    8  Install location   /opt/traefik-manager-agent  :8090
   ────────────────────────────────────────────────────────
 
-  Edit a section (1-8) or Enter to install:
+  Edit a section, or Continue
 ```
 
-Type a section number to re-configure it, then press Enter to return to the review. Press Enter with no number to install. The binary method has no **Install location** section, so it shows 7.
+Pick a section to answer it again, or Continue to install. The binary method has no **Install location** section, so it shows 7.
 
 ### What the wizard asks
 
@@ -424,17 +604,22 @@ Type a section number to re-configure it, then press Enter to return to the revi
 - Mount ACME / certs (default: `/etc/traefik/acme.json`)
 - Mount access logs (default: `/var/log/traefik/access.log`)
 - Mount plugins directory (default: `/etc/traefik/plugins`)
+- Allow certificate removal - asked when acme.json is mounted, or TLS is on for Agent + Traefik. Mounts it read-write
 
 **Restart method (section 5)**
-- None, socket proxy, poison pill, or direct Docker socket
+- None, socket proxy, poison pill, or direct Docker socket. None is not offered when certificate removal is on
 
 **CrowdSec (section 6)**
 
 | Option | What it does |
 |---|---|
 | None | Skip CrowdSec |
-| Install alongside agent | Adds a `crowdsec` service, generates a random bouncer key, writes `crowdsec/acquis.yaml`. Requires the access log mount (prompts if not set). Docker installs only. |
-| Connect to existing | Enter LAPI URL and API key. |
+| Install alongside agent | Docker methods: adds a `crowdsec` service, generates a bouncer key, writes `crowdsec/acquis.yaml`. Binary method: installs the CrowdSec package, registers a `tma` bouncer, writes `/etc/crowdsec/acquis.d/traefik.yaml`. Requires the access log mount (prompts if not set) |
+| Connect to existing | Enter LAPI URL and API key |
+
+All three ask for the alert limit. Agents never get machine credentials, so alerts and unban stay with the Traefik Manager that owns them. On the binary method, `crowdsec.lapi_port` in an answers file moves the LAPI off `8080`, which matters when the agent port or the Traefik API port already uses it.
+
+The bouncer plugin is offered with the agent + Traefik method, or with any method where the static config mount is set. See [the bouncer plugin](#crowdsec-bouncer-plugin) under mode 1.
 
 **Git backup (section 7)** - repo URL, branch, username, token, auto-push toggle
 

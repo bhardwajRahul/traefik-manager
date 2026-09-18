@@ -12,7 +12,9 @@ Traefik Manager is designed to run behind a reverse proxy on a trusted network. 
 
 The login password is hashed with **bcrypt at cost 12** before storage in `manager.yml`. The plaintext password is never written to disk. Passwords must be at least 8 characters and at most 72 bytes, which is the bcrypt limit - accented and non-Latin characters take more than one byte each.
 
-Login POSTs are rate-limited to **5 per minute per IP**, successful or not.
+Login POSTs are rate-limited to **5 per minute per IP**, successful or not. Wrong passwords from all addresses together are capped by [`LOGIN_FAILURE_LIMIT`](env-vars.md#security), and wrong 2FA codes by [`OTP_FAILURE_LIMIT`](env-vars.md#security).
+
+After the password step, 5 wrong 2FA codes or 10 minutes send you back to the password step.
 
 While [`ADMIN_PASSWORD`](env-vars.md#admin-password) is set, login compares that plaintext value instead of the stored hash, and 2FA and the in-UI password change have no effect. `flask reset-password` with `--prompt`, `--stdin` or `--password` exits with an error and writes nothing; with no password option it still writes a temporary password, which login then ignores.
 
@@ -29,7 +31,7 @@ Sessions use signed client-side cookies (Flask SecureCookieSession). The signing
 
 Set `COOKIE_SECURE=true` whenever TM is accessed over HTTPS. Without it, browsers may send cookies over HTTP, which is a risk if your reverse proxy is not enforcing HTTPS-only access. It also adds a `Strict-Transport-Security` response header.
 
-Logging out clears the session.
+Logging out clears the session. Changing or resetting the password, turning off two-factor, or changing `ADMIN_PASSWORD` and restarting signs out every other session. **Settings - Authentication - Password & 2FA** can also sign out every other session on demand. API keys are not affected.
 
 ---
 
@@ -124,6 +126,8 @@ When an external provider such as Authentik, Authelia, or Keycloak already prote
 | Endpoint | Limit |
 |---|---|
 | Login, OTP verification | 5 / min per IP |
+| Wrong passwords, all addresses | 30 / min, 200 / hour (`LOGIN_FAILURE_LIMIT`) |
+| Wrong 2FA codes, all addresses | 10 / min, 30 / hour (`OTP_FAILURE_LIMIT`) |
 | OIDC login initiation | 10 / min per IP |
 | Password change | 10 / min per IP |
 | Backup restore | 10 / min per IP |
@@ -146,14 +150,16 @@ The sign-in form is deliberately untouched, so your password manager still works
 
 ## Outbound requests (SSRF protection)
 
-Several features make TM issue outbound HTTP requests on your behalf - the Traefik connection tests, the CrowdSec setup test, the webhook test, the URL ping tool, and the OIDC provider test. To prevent these from being used to reach cloud metadata endpoints, these fetchers reject:
+Several features make TM issue outbound requests on your behalf - the Traefik connection tests, the CrowdSec setup test, the git connection tests, the webhook test, the URL ping tool, and the OIDC provider test. To prevent these from being used to reach cloud metadata endpoints, these fetchers reject:
 
 - Link-local addresses (`169.254.0.0/16`, including the `169.254.169.254` cloud metadata IP)
 - Multicast, reserved, and unspecified addresses
 
 Private and loopback targets are still allowed, because reaching internal services (e.g. `http://traefik:8080`) is the normal, legitimate use for a self-hosted reverse-proxy manager. Redirects are not followed on the ping tool.
 
-The git setup test is the exception: it runs `git ls-remote`, so it is restricted by URL scheme rather than by destination address.
+The git connection tests run `git ls-remote` under the same address rules and do not follow redirects, on the Host and on agents. The setup page's checks answer only a signed-in admin.
+
+A saved Traefik API password is only sent to the saved API URL. Testing a different URL, or saving one on a different host, port or path, needs the password typed again.
 
 ---
 
@@ -202,6 +208,17 @@ The Static Config editor lets you edit `traefik.yml` directly from the UI and re
 The socket proxy and poison-pill methods limit the blast radius if TM is compromised. Direct socket access allows TM to interact with any container on the host.
 
 If you do not use the Static Config editor, do not mount `traefik.yml` read-write and do not set `RESTART_METHOD`.
+
+## Removing certificates
+
+The Certs tab can delete entries from `acme.json`, which is where Traefik keeps every issued certificate **and its private key**. It is off unless both of these are true:
+
+- TM can write `acme.json`: mounted without `:ro`, or on a native install, owned by the user TM runs as
+- a `RESTART_METHOD` is set, because Traefik only reads `acme.json` at startup
+
+TM never reads or logs the key material, and only ever removes whole entries; the ACME account is left untouched. A timestamped copy of the file is written to `BACKUP_DIR` first, with mode `600`, which means **your backup directory then holds a copy of every private key** - treat it with the same care as the store itself. The file is rewritten in place rather than replaced, so a bind-mounted `acme.json` stays attached to Traefik, and its mode is kept at `600` because Traefik refuses to load a store with any group or other permission.
+
+Leave `acme.json` mounted `:ro` and none of this is reachable.
 
 ---
 

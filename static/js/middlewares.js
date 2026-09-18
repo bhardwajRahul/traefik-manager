@@ -33,7 +33,8 @@ function openMwModal() {
     const mwCfHid = document.getElementById('mwConfigFile');
     const newMwInput = document.getElementById('newMwFileName');
     if (newMwInput) { newMwInput.style.display = 'none'; newMwInput.value = ''; }
-    _populateConfigFileSelect('mw').then(() => { _openMwPanel(); });
+    _openMwPanel();
+    _populateConfigFileSelect('mw');
     const mwTplSel = document.getElementById('mwTemplate');
     if (mwTplSel) mwTplSel.value = '';
     setMwProtocol('http');
@@ -563,7 +564,7 @@ function _tmMwCard(mw, showCf) {
                        : chained ? 'used in a chain' : 'unused';
     const yaml = String(mw.yaml || '').split('\n').slice(0, 4).join('\n');
     const rail = `<span class="tm-rail tm-rail-sm" onclick="event.stopPropagation()">` +
-        (_faNeedsLimit(mw.yaml) ? `<button type="button" class="tm-btn" title="No response size limit set - Traefik 3.7 warns about this. Click to add one" data-mw='${mwJson}' onclick="event.stopPropagation();addFaLimit(this)"><i class="ph-bold ph-warning" style="color:var(--amber)"></i></button>` : '') +
+        (_faNeedsLimit(mw.yaml) ? `<button type="button" class="tm-btn" title="No response size limit set - Traefik 3.7 warns about this. Click to add one" data-mw='${mwJson}' onclick="event.stopPropagation();addFaLimit(this)"><i class="ph-bold ph-warning" style="color:var(--yellow)"></i></button>` : '') +
         `<button type="button" class="tm-btn" title="Edit" data-mw='${mwJson}' onclick="event.stopPropagation();handleMwEdit(this)"><i class="ph-bold ph-pencil-simple"></i></button>` +
         `<button type="button" class="tm-btn" title="Delete" onclick="event.stopPropagation();deleteMw(${_jsArg(mw.name)}${cfArg})"><i class="ph-bold ph-trash"></i></button>` +
         '</span>';
@@ -647,15 +648,15 @@ async function handleMwEdit(btn) {
     if (origProtoEl2) origProtoEl2.value = mwProto;
     setMwMode('yaml');
     _showMwWizard('');
+    _openMwPanel();
+    _initMwMonaco(mw.yaml.trim());
+    _loadCustomMwTemplates();
     await _populateConfigFileSelect('mw');
     const cfSel = document.getElementById('mwConfigFileSelect');
     if (mw.configFile) {
         if (cfSel) cfSel.value = mw.configFile;
         document.getElementById('mwConfigFile').value = mw.configFile;
     }
-    _openMwPanel();
-    _initMwMonaco(mw.yaml.trim());
-    _loadCustomMwTemplates();
 }
 
 async function _loadCustomMwTemplates() {
@@ -852,9 +853,22 @@ let _pluginEditName  = null;
 let _pluginStaticMonaco = null;
 let _pluginMwMonaco = null;
 
+function _pluginsHydrate(c) {
+    _allPlugins = Array.isArray(c.plugins) ? c.plugins : [];
+    _pluginCanManage = !!c.canManage;
+    const addBtn = document.getElementById('pluginAddBtnWrap');
+    if (addBtn) addBtn.style.display = _pluginCanManage ? 'flex' : 'none';
+    setTabCount('plugins', _allPlugins.length);
+    _pluginCatalog = {};
+    renderPluginsVerdict();
+    renderPluginCards();
+}
+
 async function refreshPluginsTab() {
     const container = document.getElementById('pluginsContent');
-    container.innerHTML = `<div class="text-center py-16" style="color:var(--muted)"><i class="ph-light ph-spinner-gap text-4xl block mb-3 animate-spin opacity-40"></i><p>Loading plugins...</p></div>`;
+    if (!tabCacheHydrate('plugins', _pluginsHydrate)) {
+        container.innerHTML = `<div class="text-center py-16" style="color:var(--muted)"><i class="ph-light ph-spinner-gap text-4xl block mb-3 animate-spin opacity-40"></i><p>Loading plugins...</p></div>`;
+    }
     try {
         const availP = _activeAgent
             ? agentFetch('/api/static/status').then(r => r.json()).then(d => ({ available: d.configured === true })).catch(() => ({ available: false }))
@@ -903,6 +917,7 @@ async function refreshPluginsTab() {
         }
 
         if (plugins.length === 0) {
+            tabCachePut('plugins', null);
             const addHint = _pluginCanManage
                 ? `<button onclick="openPluginForm()" class="btn-primary text-xs mt-3"><i class="ph-bold ph-plus"></i> Add Plugin</button>`
                 : `<p class="text-xs max-w-sm mx-auto mt-1">Add plugins under <code class="font-mono">experimental.plugins</code> in your <code class="font-mono">traefik.yml</code>.</p>`;
@@ -916,6 +931,7 @@ async function refreshPluginsTab() {
         }
 
         _allPlugins = plugins;
+        tabCachePut('plugins', { plugins: plugins, canManage: _pluginCanManage });
         setTabCount('plugins', plugins.length);
         _pluginCatalog = {};
         renderPluginsVerdict();

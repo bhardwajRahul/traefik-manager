@@ -9,6 +9,8 @@ def _boot(monkeypatch, tmp_path, env_overrides=None):
     for k, v in (env_overrides or {}).items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(env_mod, 'READ_PATHS', [])
+    monkeypatch.setattr(env_mod, '_SETTINGS_PATHS', {})
+    monkeypatch.setattr(env_mod, '_ENV_STATIC_DIRS', [])
     monkeypatch.setattr(env_mod, 'ALLOWED_FILES', [])
     monkeypatch.setattr(env_mod, 'STATIC_CONFIG_DIRS', [])
     monkeypatch.setattr(env_mod, 'ALLOWED_FILE_PREFIXES', (str(tmp_path / 'cfg') + os.sep,))
@@ -22,7 +24,7 @@ def test_a_settings_path_does_not_open_its_whole_directory(monkeypatch, tmp_path
     (secrets / 'shadow').write_text('root:$6$hash\n')
     (secrets / 'passwd').write_text('root:x:0:0\n')
 
-    env.register_read_path(str(secrets / 'shadow'))
+    env.set_settings_paths('log', str(secrets / 'shadow'))
     assert config.readable_config_path(str(secrets / 'shadow')), \
         'the configured file itself must stay readable, or the Logs tab breaks'
     assert not config.readable_config_path(str(secrets / 'passwd')), \
@@ -36,7 +38,7 @@ def test_a_settings_directory_still_opens_that_directory(monkeypatch, tmp_path):
     (certs / 'ovh.json').write_text('{}')
     (certs / 'lan.json').write_text('{}')
 
-    env.register_read_path(str(certs))
+    env.set_settings_paths('acme', str(certs))
     assert config.readable_config_path(str(certs / 'ovh.json')), \
         'ACME_JSON_PATH may be a directory whose .json files are all read'
     assert config.readable_config_path(str(certs / 'lan.json'))
@@ -60,7 +62,7 @@ def test_a_settings_static_path_does_not_open_its_directory_for_writing(monkeypa
     etc.mkdir()
     (etc / 'traefik.yml').write_text('api: {}\n')
 
-    env.register_static_path(str(etc / 'traefik.yml'))
+    env.set_settings_paths('static', str(etc / 'traefik.yml'))
     assert config.safe_file_path(str(etc / 'traefik.yml')), \
         'the configured static config must stay writable, or the editor breaks'
     assert not config.safe_file_path(str(etc / 'cron.d')), \

@@ -1,9 +1,11 @@
 import fcntl
+import copy
 import os
 import re
 import time
 import base64
 import hashlib
+import hmac
 from urllib.parse import quote, urlparse
 import shutil
 import secrets
@@ -15,7 +17,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from datetime import datetime, timezone, timedelta
 import click
 from flask import (Flask, render_template, request, redirect,
-                   url_for, flash, jsonify, abort, session, send_file)
+                   url_for, flash, jsonify, abort, session, send_file, g, has_request_context)
+from functools import wraps
 from werkzeug.middleware.proxy_fix import ProxyFix
 from ruamel.yaml import YAML
 from ruamel.yaml import YAML as SafeYAML
@@ -34,6 +37,7 @@ _readable_config_path  = _cfg.readable_config_path
 _is_safe_path          = _cfg.is_safe_path
 _resolve_config_path   = _cfg.resolve_config_path
 _safe_api_url          = _cfg.safe_api_url
+_same_api_origin       = _cfg.same_api_origin
 _sanitize_go_templates = _cfg.sanitize_go_templates
 _restore_go_templates  = _cfg.restore_go_templates
 load_config            = _cfg.load_config
@@ -48,6 +52,7 @@ from core import settings as _settings
 OPTIONAL_TABS     = _settings.OPTIONAL_TABS
 load_settings     = _settings.load_settings
 save_settings     = _settings.save_settings
+update_settings   = _settings.update_settings
 _get_acme_json_path      = _settings._get_acme_json_path
 _get_access_log_path     = _settings._get_access_log_path
 _get_static_config_path  = _settings._get_static_config_path
@@ -62,6 +67,10 @@ from core import notify_providers as _notify_providers
 from core import monitor as _monitor
 from core import reachability as _reach
 from core import names as _naming
+from core import providers as _providers
+from core import cert_usage as _cert_usage
+from core import locks as _locks
+from core import acme_store as _acme
 from core import route_health as _rh
 from core import updates as _updates
 from core import traefik as _trae
@@ -228,8 +237,19 @@ class _BasePathMiddleware:
         return self.wsgi_app(environ, start_response)
 
 
+class _TrustedProxyFix:
+    def __init__(self, wsgi_app, hops):
+        self.raw = wsgi_app
+        self.fixed = ProxyFix(wsgi_app, x_for=hops, x_proto=1, x_host=1)
+
+    def __call__(self, environ, start_response):
+        if env.peer_is_trusted(environ.get('REMOTE_ADDR')):
+            return self.fixed(environ, start_response)
+        return self.raw(environ, start_response)
+
+
 app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=PROXY_FIX_HOPS, x_proto=1, x_host=1)
+app.wsgi_app = _TrustedProxyFix(app.wsgi_app, PROXY_FIX_HOPS)
 if env.BASE_PATH:
     app.wsgi_app = _BasePathMiddleware(app.wsgi_app, env.BASE_PATH)
     app.config['APPLICATION_ROOT'] = env.BASE_PATH
@@ -326,7 +346,25 @@ INACTIVITY_TIMEOUT = _auth.INACTIVITY_TIMEOUT
 
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-limiter = Limiter(get_remote_address, app=app, default_limits=[], storage_uri="memory://")
+from core import rate_store as _rate_store
+limiter = Limiter(get_remote_address, app=app, default_limits=[], storage_uri=_rate_store.SCHEME)
+
+
+def _failed_sign_in(response):
+    return response.status_code == 200
+
+
+_login_failure_limit = limiter.shared_limit(
+    lambda: env.LOGIN_FAILURE_LIMIT or env.DEFAULT_LOGIN_FAILURE_LIMIT, scope='login-failures',
+    key_func=lambda: 'account', methods=['POST'], deduct_when=_failed_sign_in,
+    exempt_when=lambda: not env.LOGIN_FAILURE_LIMIT,
+    error_message='Too many failed sign-in attempts. Try again later.')
+
+_otp_failure_limit = limiter.shared_limit(
+    lambda: env.OTP_FAILURE_LIMIT or env.DEFAULT_OTP_FAILURE_LIMIT, scope='otp-failures',
+    key_func=lambda: 'account', methods=['POST'], deduct_when=_failed_sign_in,
+    exempt_when=lambda: not env.OTP_FAILURE_LIMIT,
+    error_message='Too many failed two-factor codes. Try again later.')
 
 
 BACKUP_DIR         = env.BACKUP_DIR
@@ -346,6 +384,53 @@ _ALLOWED_API_SCHEMES = env.ALLOWED_API_SCHEMES
 
 def _ssrf_ok(url: str) -> bool:
     return _reach.ssrf_ok(url)
+
+
+_EDIT_DICTS = ('managed_middlewares', 'disabled_routes')
+
+
+def _edit_scope() -> str:
+    agent_id = (request.form.get('agent_id', '') or request.args.get('agent_id', '')
+                or request.args.get('server', ''))
+    if not agent_id:
+        body = request.get_json(force=True, silent=True)
+        if isinstance(body, dict):
+            agent_id = body.get('agent_id') or body.get('server') or ''
+    agent_id = str(agent_id or '').strip()
+    return f'config:agent:{agent_id}' if agent_id else 'config:local'
+
+
+def _config_edit(fn):
+    @wraps(fn)
+    def inner(*args, **kwargs):
+        with _locks.config_edit_lock(_edit_scope()):
+            owner = 'edit_base' not in g
+            if owner:
+                current = load_settings()
+                g.edit_base = {k: copy.deepcopy(current.get(k) or {}) for k in _EDIT_DICTS}
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                if owner:
+                    g.pop('edit_base', None)
+    return inner
+
+
+def _save_edit_dicts(**after):
+    base = g.get('edit_base') if has_request_context() else None
+    if base is None:
+        return update_settings(**after)
+    _settings.merge_settings_dicts({k: base.get(k) or {} for k in after}, **after)
+    for k, v in after.items():
+        base[k] = copy.deepcopy(v or {})
+
+
+def _agents_locked(fn):
+    @wraps(fn)
+    def inner(*args, **kwargs):
+        with _locks.file_lock(env.AGENTS_PATH):
+            return fn(*args, **kwargs)
+    return inner
 
 
 def _register_config_path(path: str):
@@ -410,6 +495,14 @@ def _best_entrypoint() -> str:
     return 'websecure'
 
 
+def _detect_provider_tabs() -> list:
+    try:
+        return sorted(_providers.tabs_from_overview(traefik_api_get('/api/overview')))
+    except Exception:
+        logger.debug("Could not read the Traefik providers for the setup wizard")
+        return []
+
+
 def _detect_setup_self_route() -> tuple[str, str]:
     settings = load_settings()
     saved = settings.get('self_route', {})
@@ -460,6 +553,25 @@ def _ensure_password():
     )
 
 
+def _sync_admin_password_fingerprint():
+    admin_pw = os.environ.get('ADMIN_PASSWORD', '').strip()
+    if not admin_pw:
+        return
+    key = app.secret_key if isinstance(app.secret_key, bytes) else str(app.secret_key).encode()
+    fingerprint = hmac.new(key, admin_pw.encode(), hashlib.sha256).hexdigest()
+    try:
+        stored = load_settings().get('admin_password_fp', '')
+        if stored and hmac.compare_digest(stored, fingerprint):
+            return
+        if stored:
+            _settings.bump_session_epoch(admin_password_fp=fingerprint)
+            logger.warning("ADMIN_PASSWORD changed since the last start, so every browser session was signed out")
+        else:
+            update_settings(admin_password_fp=fingerprint)
+    except Exception:
+        logger.exception("Could not record the ADMIN_PASSWORD fingerprint")
+
+
 def _read_traefik_labels():
     try:
         import docker as _docker
@@ -499,6 +611,7 @@ logger.info(f"Backup Dir:     {BACKUP_DIR}")
 logger.info(f"Traefik API:    {_s['traefik_api_url']}")
 logger.info(f"Restart Method: {_restart_meth}")
 logger.info(f"Trusted Hops:   {PROXY_FIX_HOPS}")
+logger.info(f"Trusted Proxies: {', '.join(env.trusted_proxies_list())}")
 logger.info(f"Static Config:  {_static_path if _static_path else 'not configured'}")
 logger.info(f"Domains:        {_s['domains']}")
 logger.info(f"Cert Resolver:  {_s['cert_resolver'] or 'not set'}")
@@ -515,6 +628,7 @@ if _s.get('oidc_enabled') and not _s.get('oidc_allowed_emails', '').strip() and 
 logger.info("===========================================")
 
 _ensure_password()
+_sync_admin_password_fingerprint()
 
 
 @app.context_processor
@@ -643,12 +757,12 @@ def _reencrypt_file(name, read, write):
 
 def _reencrypt_plaintext_secrets():
     rewritten = []
-    if _reencrypt_file('manager.yml', load_settings, lambda s: save_settings(
+    if _reencrypt_file('manager.yml', lambda: load_settings(fresh=True), lambda s: save_settings(
             domains=s['domains'], cert_resolver=s['cert_resolver'],
             traefik_api_url=s['traefik_api_url'], auth_enabled=s['auth_enabled'],
             password_hash=s['password_hash'], visible_tabs=s['visible_tabs'])):
         rewritten.append('manager.yml')
-    if _reencrypt_file('agents.yml', _ag.load_agents, _ag.save_agents_file):
+    if _reencrypt_file('agents.yml', lambda: _ag.load_agents(fresh=True), _ag.save_agents_file):
         rewritten.append('agents.yml')
     crypto.clear_plaintext_seen()
     return rewritten
@@ -713,19 +827,53 @@ def set_security_headers(response):
 def _close_reset_window(settings):
     if not settings.get('setup_password_reset'):
         return
-    save_settings(
-        domains=settings['domains'], cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings.get('auth_enabled', True),
-        password_hash=settings.get('password_hash', ''),
-        visible_tabs=settings['visible_tabs'],
-        setup_password_reset=False,
-    )
-    logger.warning("Password reset window closed after a successful login")
+    update_settings(setup_password_reset=False)
+    logger.warning("Password reset window closed after a successful sign-in")
+
+
+def _start_session(remember=False, extra=None, notify=True, note=None):
+    values = {'authenticated': True,
+              'last_active': time.time(),
+              'login_time': datetime.now(timezone.utc).isoformat()}
+    values.update(extra or {})
+    session.clear()
+    session.update(values)
+    session.permanent = bool(remember)
+    _auth._stamp_session()
+    if notify:
+        add_notification('info', note or f"Login from {request.remote_addr}", category='security')
+    _close_reset_window(load_settings())
+
+
+_PASSWORD_CHANGE_EXEMPT = {
+    'static', 'login', 'login_otp', 'logout', 'setup', 'force_change_password',
+    'api_change_password', 'api_health', 'oidc_login', 'oidc_callback',
+    'setup_test_git', 'setup_test_crowdsec', 'api_setup_test_connection',
+}
+
+
+@app.before_request
+def _require_password_change():
+    if request.endpoint is None or request.endpoint in _PASSWORD_CHANGE_EXEMPT:
+        return None
+    if request.headers.get('X-Api-Key'):
+        return None
+    _auth._drop_stale_session()
+    if not session.get('authenticated') or os.environ.get('ADMIN_PASSWORD', '').strip():
+        return None
+    if session.get('auth_method') == 'oidc' or not _auth_enabled():
+        return None
+    settings = load_settings()
+    if not settings.get('must_change_password'):
+        return None
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'password change required'}), 403
+    return redirect(url_for('force_change_password') if settings.get('setup_complete') else url_for('setup'))
 
 
 @app.route('/login', methods=['GET', 'POST'])
 @limiter.limit("5 per minute", methods=["POST"])
+@_login_failure_limit
 def login():
 
     if not _auth_required():
@@ -770,18 +918,13 @@ def login():
                 session['otp_next']     = request.form.get('next') or ''
                 session['otp_must_change'] = settings.get('must_change_password', False)
                 session['otp_setup_complete'] = settings.get('setup_complete', False)
+                session['otp_epoch'] = int(settings.get('session_epoch') or 0)
+                _auth.start_otp_attempt()
                 logger.info(f"OTP step required for login from {request.remote_addr}")
                 return redirect(url_for('login_otp'))
 
-            _vals = {'authenticated': True,
-                     'last_active': time.time(),
-                     'login_time': datetime.now(timezone.utc).isoformat()}
-            session.clear()
-            session.update(_vals)
-            session.permanent = remember
+            _start_session(remember)
             logger.info(f"Successful login from {request.remote_addr}")
-            add_notification('info', f"Login from {request.remote_addr}", category='security')
-            _close_reset_window(settings)
 
             if settings.get('must_change_password', False) and not admin_pw:
                 if not settings.get('setup_complete', False):
@@ -810,6 +953,7 @@ def login():
 
 
 @app.route('/setup', methods=['GET', 'POST'])
+@limiter.limit("5 per minute", methods=["POST"])
 def setup():
     if not _auth_required():
         return redirect(url_for('index'))
@@ -817,6 +961,7 @@ def setup():
     current = load_settings()
 
     reset_mode = bool(current.get('setup_password_reset', False))
+    otp_required = bool(current.get('otp_enabled') and current.get('otp_secret'))
 
     if not reset_mode:
         if current.get('setup_complete', False):
@@ -829,33 +974,44 @@ def setup():
 
     if reset_mode and request.method == 'POST':
         _check_csrf()
+        refusal = None
+        if os.environ.get('ADMIN_PASSWORD', '').strip():
+            refusal = 'ADMIN_PASSWORD is set, so a password saved here would never be used. Change that variable and restart instead.'
+        elif not _auth_enabled():
+            refusal = 'Local password login is turned off. Sign in with your identity provider.'
+        if refusal:
+            update_settings(setup_password_reset=False)
+            logger.warning(f"Password reset refused from {request.remote_addr}: {refusal}")
+            flash(refusal, 'error')
+            return redirect(url_for('login'))
         new_pw  = request.form.get('password', '')
         confirm = request.form.get('confirm', '')
         err = _password_error(new_pw)
         if not err and new_pw != confirm:
             err = 'Passwords do not match.'
+        if not err and otp_required:
+            code = request.form.get('code', '').strip()
+            try:
+                import pyotp
+                code_ok = bool(code) and pyotp.TOTP(current['otp_secret']).verify(code, valid_window=1)
+            except Exception:
+                logger.exception("OTP verify error during a password reset")
+                code_ok = False
+            if not code_ok:
+                err = 'Enter the current code from your authenticator app.'
+                logger.warning(f"Password reset with a wrong two-factor code from {request.remote_addr}")
         if err:
             return render_template('login.html', setup_mode=True, reset_mode=True,
                                    error=err, csrf_token=_get_csrf_token(),
                                    defaults={'domains': current['domains'],
                                              'cert_resolver': current['cert_resolver'],
                                              'traefik_api_url': current['traefik_api_url']},
-                                   temp_password_mode=False,
+                                   temp_password_mode=False, otp_required=otp_required,
                                    detected_self_domain='', detected_self_svc='',
                                    detected_self_entry_point='')
-        save_settings(
-            domains=current['domains'],
-            cert_resolver=current['cert_resolver'],
-            traefik_api_url=current['traefik_api_url'],
-            auth_enabled=current.get('auth_enabled', True),
-            password_hash=_hash_password(new_pw),
-            visible_tabs=current['visible_tabs'],
-            must_change_password=False,
-            setup_password_reset=False,
-        )
-        session.clear()
-        session['authenticated'] = True
-        session['login_time'] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
+        _settings.bump_session_epoch(password_hash=_hash_password(new_pw),
+                                     must_change_password=False, setup_password_reset=False)
+        _start_session(False, notify=False)
         logger.warning(f"Password reset completed from {request.remote_addr}")
         return redirect(url_for('index'))
 
@@ -967,32 +1123,36 @@ def setup():
             if temp_password_mode:
                 return redirect(url_for('force_change_password'))
 
-            session.clear()
-            session.permanent        = True
-            session['authenticated'] = True
-            session['last_active']   = time.time()
-            session['login_time']    = datetime.now(timezone.utc).isoformat()
+            _start_session(True, notify=False)
             return redirect(url_for('index'))
 
     detected_domain, detected_svc = _detect_setup_self_route()
     detected_entry_point = load_settings().get('self_route', {}).get('entry_point', '') or _best_entrypoint()
     return render_template('login.html', setup_mode=True, error=error,
-                           reset_mode=reset_mode,
+                           reset_mode=reset_mode, otp_required=otp_required,
                            defaults=defaults, csrf_token=_get_csrf_token(),
                            temp_password_mode=temp_password_mode,
                            detected_self_domain=detected_domain,
                            detected_self_svc=detected_svc,
-                           detected_self_entry_point=detected_entry_point)
+                           detected_self_entry_point=detected_entry_point,
+                           detected_tabs=_detect_provider_tabs())
 
 
 def _setup_open() -> bool:
     return not load_settings().get('setup_complete', False)
 
 
+def _setup_probe_allowed() -> bool:
+    _auth._check_inactivity()
+    if not _auth_required() or not _has_password_set():
+        return True
+    return bool(session.get('authenticated'))
+
+
 @app.route('/setup/test-crowdsec', methods=['POST'])
 @limiter.limit("10 per minute")
 def setup_test_crowdsec():
-    if not _setup_open():
+    if not _setup_open() or not _setup_probe_allowed():
         abort(404)
     _check_csrf()
     data = request.get_json(silent=True) or {}
@@ -1017,7 +1177,7 @@ def setup_test_crowdsec():
 @app.route('/setup/test-git', methods=['POST'])
 @limiter.limit("10 per minute")
 def setup_test_git():
-    if not _setup_open():
+    if not _setup_open() or not _setup_probe_allowed():
         abort(404)
     _check_csrf()
     data     = request.get_json(silent=True) or {}
@@ -1027,10 +1187,13 @@ def setup_test_git():
         return jsonify({'ok': False, 'error': 'No repository URL'}), 400
     if not _valid_git_url(repo_url):
         return jsonify({'ok': False, 'error': 'Unsupported URL - use https://, http://, ssh:// or git://'}), 400
+    if not _ssrf_ok(repo_url):
+        return jsonify({'ok': False, 'error': 'Target address not allowed'}), 400
     creds = {'username': str(data.get('username', '')).strip(), 'token': token} if token else None
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
-        _, err, rc = _git_run(['ls-remote', '--quiet', '--', repo_url], cwd=tmpdir, credentials=creds)
+        _, err, rc = _git_run(['ls-remote', '--quiet', '--', repo_url], cwd=tmpdir, credentials=creds,
+                              extra_config=['http.followRedirects=false'])
     if rc == 0:
         return jsonify({'ok': True})
     safe = err.replace(token, '***') if token else err
@@ -1062,17 +1225,13 @@ def force_change_password():
         if not error and new_pw != confirm:
             error = 'Passwords do not match.'
         if not error:
-            save_settings(
-                domains=settings['domains'],
-                cert_resolver=settings['cert_resolver'],
-                traefik_api_url=settings['traefik_api_url'],
-                auth_enabled=settings['auth_enabled'],
+            _settings.bump_session_epoch(
                 password_hash=_hash_password(new_pw),
-                visible_tabs=settings['visible_tabs'],
                 must_change_password=False,
                 setup_password_reset=False,
                 setup_complete=True,
             )
+            _auth._stamp_session()
             logger.info(f"Forced password change completed from {request.remote_addr}")
             return redirect(url_for('index'))
 
@@ -1126,13 +1285,8 @@ def reset_password_cli(disable_otp, prompt_pw, from_stdin, password_opt):
                 'Change or unset that variable instead, or this password will not work.')
 
     settings = load_settings()
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings.get('auth_enabled', True),
+    _settings.bump_session_epoch(
         password_hash=_hash_password(password),
-        visible_tabs=settings['visible_tabs'],
         must_change_password=False if explicit else True,
         setup_password_reset=False if explicit else True,
         setup_complete=settings.get('setup_complete', True),
@@ -1182,16 +1336,10 @@ def api_change_password():
         logger.warning(f"Failed password change attempt from {request.remote_addr}")
         return jsonify({'error': 'Current password is incorrect.'}), 403
 
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=_hash_password(new_pw),
-        visible_tabs=settings['visible_tabs'],
-        must_change_password=False,
-        setup_password_reset=False,
-    )
+    _settings.bump_session_epoch(password_hash=_hash_password(new_pw),
+                                 must_change_password=False, setup_password_reset=False)
+    if session.get('authenticated'):
+        _auth._stamp_session()
     logger.info(f"Password changed successfully from {request.remote_addr}")
     return jsonify({'success': True})
 
@@ -1225,16 +1373,7 @@ def api_auth_external_ack():
     ack  = bool(data.get('auth_external_ack'))
     if ack and _auth_required():
         return jsonify({'error': 'Built-in authentication or OIDC is active, so there is nothing to acknowledge'}), 400
-    settings = load_settings()
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        auth_external_ack=ack,
-        password_hash=settings['password_hash'],
-        visible_tabs=settings['visible_tabs'],
-    )
+    update_settings(auth_external_ack=ack)
     logger.warning(f"auth_external_ack set to {ack} by {request.remote_addr} - "
                    f"the operator asserts this instance is protected by an external provider"
                    if ack else f"auth_external_ack cleared by {request.remote_addr}")
@@ -1243,8 +1382,13 @@ def api_auth_external_ack():
 
 @app.route('/login/otp', methods=['GET', 'POST'])
 @limiter.limit("5 per minute", methods=["POST"])
+@_otp_failure_limit
 def login_otp():
     if not session.get('otp_pending'):
+        return redirect(url_for('login'))
+    if _auth.otp_attempt_expired():
+        session.clear()
+        flash('Your sign-in expired. Enter your password again.', 'error')
         return redirect(url_for('login'))
 
     error = None
@@ -1259,27 +1403,31 @@ def login_otp():
         except Exception:
             logger.exception("OTP verify error - secret may be corrupt")
             otp_valid = False
+        if otp_valid and int(session.get('otp_epoch') or 0) != int(settings.get('session_epoch') or 0):
+            session.clear()
+            logger.warning(f"OTP sign-in from {request.remote_addr} abandoned, the password changed after the password step")
+            flash('Your password was changed while you were signing in. Sign in again.', 'error')
+            return redirect(url_for('login'))
         if otp_valid:
             remember       = session.get('otp_remember', True)
             must_change    = session.get('otp_must_change', False)
             setup_complete = session.get('otp_setup_complete', False)
             next_url       = session.get('otp_next', '') or url_for('index')
-            _vals = {'authenticated': True,
-                     'last_active': time.time(),
-                     'login_time': datetime.now(timezone.utc).isoformat()}
-            session.clear()
-            session.update(_vals)
-            session.permanent = remember
+            _auth.forget_otp_attempt()
+            _start_session(remember)
             logger.info(f"Successful OTP login from {request.remote_addr}")
-            add_notification('info', f"Login from {request.remote_addr}", category='security')
             if must_change:
                 if not setup_complete:
                     return redirect(url_for('setup'))
                 return redirect(url_for('force_change_password'))
             return redirect(_safe_next(next_url))
         else:
-            error = 'Invalid code. Please try again.'
             logger.warning(f"Failed OTP attempt from {request.remote_addr}")
+            if _auth.record_otp_failure() >= _auth.OTP_MAX_ATTEMPTS:
+                session.clear()
+                flash('Too many wrong codes. Enter your password again.', 'error')
+                return redirect(url_for('login'))
+            error = 'Invalid code. Please try again.'
 
     return render_template('login.html', otp_mode=True, error=error,
                            csrf_token=_get_csrf_token())
@@ -1308,17 +1456,8 @@ def api_otp_enable():
     secret = session.pop('otp_pending_secret', '')
     if not secret or not pyotp.TOTP(secret).verify(code, valid_window=1):
         return jsonify({'error': 'Invalid code - please try again.'}), 400
-    settings = load_settings()
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'],
-        visible_tabs=settings['visible_tabs'],
-        otp_secret=secret,
-        otp_enabled=True,
-    )
+    update_settings(otp_secret=secret,
+                    otp_enabled=True)
     logger.info(f"OTP enabled by {request.remote_addr}")
     return jsonify({'success': True})
 
@@ -1327,18 +1466,22 @@ def api_otp_enable():
 @csrf_protect
 @login_required
 def api_otp_disable():
-    settings = load_settings()
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'],
-        visible_tabs=settings['visible_tabs'],
-        otp_secret='',
-        otp_enabled=False,
-    )
+    _settings.bump_session_epoch(otp_secret='', otp_enabled=False)
+    if session.get('authenticated'):
+        _auth._stamp_session()
     logger.info(f"OTP disabled by {request.remote_addr}")
+    return jsonify({'success': True})
+
+
+@app.route('/api/auth/sessions/revoke', methods=['POST'])
+@csrf_protect
+@login_required
+def api_revoke_sessions():
+    _settings.bump_session_epoch()
+    if session.get('authenticated'):
+        _auth._stamp_session()
+    logger.warning(f"Every other session was signed out from {request.remote_addr}")
+    add_notification('warning', f"Every other session was signed out from {request.remote_addr}", category='security')
     return jsonify({'success': True})
 
 
@@ -1370,17 +1513,9 @@ def api_apikey_generate():
         'preview':    preview,
         'created_at': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M'),
     })
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'],
-        visible_tabs=settings['visible_tabs'],
-        otp_secret=settings['otp_secret'],
-        otp_enabled=settings['otp_enabled'],
-        api_keys=api_keys,
-    )
+    update_settings(otp_secret=settings['otp_secret'],
+                    otp_enabled=settings['otp_enabled'],
+                    api_keys=api_keys)
     logger.info(f"API key '{device_name}' generated by {request.remote_addr}")
     return jsonify({'ok': True, 'key': key})
 
@@ -1395,17 +1530,9 @@ def api_apikey_revoke():
         return jsonify({'ok': False, 'error': 'preview is required'}), 400
     settings = load_settings()
     api_keys = [k for k in settings.get('api_keys', []) if k.get('preview') != preview]
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'],
-        visible_tabs=settings['visible_tabs'],
-        otp_secret=settings['otp_secret'],
-        otp_enabled=settings['otp_enabled'],
-        api_keys=api_keys,
-    )
+    update_settings(otp_secret=settings['otp_secret'],
+                    otp_enabled=settings['otp_enabled'],
+                    api_keys=api_keys)
     logger.info(f"API key revoked by {request.remote_addr}")
     return jsonify({'ok': True})
 
@@ -1434,9 +1561,13 @@ def api_overview():
     return jsonify(traefik_api_get('/api/overview') or {})
 
 def _traefik_proto_payload(kind):
-    fetched = {p: traefik_api_get_all(f'/api/{p}/{kind}') for p in ('http', 'tcp', 'udp')}
+    fetched  = {}
+    complete = []
+    for proto in ('http', 'tcp', 'udp'):
+        fetched[proto] = traefik_api_get_all(f'/api/{proto}/{kind}', complete)
     out = {p: (v or []) for p, v in fetched.items()}
     out['reachable'] = any(v is not None for v in fetched.values())
+    out['complete']  = all(v is not None for v in fetched.values()) and not complete
     return out
 
 
@@ -1448,6 +1579,7 @@ def api_routers():
 @app.route('/api/services/<path:name>/ownership', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_service_ownership(name):
     data   = request.get_json(silent=True) or {}
     adopt  = bool(data.get('adopt'))
@@ -1480,12 +1612,7 @@ def api_service_ownership(name):
         del ledger[key]
     else:
         return jsonify({'ok': True, 'owned': False})
-    save_settings(
-        domains=settings['domains'], cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'], auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'], visible_tabs=settings['visible_tabs'],
-        managed_middlewares=ledger,
-    )
+    _save_edit_dicts(managed_middlewares=ledger)
     logger.info(f"Service {bare!r} {'adopted' if adopt else 'released'} by {request.remote_addr}")
     return jsonify({'ok': True, 'owned': adopt})
 
@@ -1639,6 +1766,7 @@ def _svc_agent_ctx():
 @app.route('/api/services', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_service_save():
     data      = request.get_json(silent=True) or {}
     name      = str(data.get('name') or '').strip()
@@ -1747,12 +1875,7 @@ def api_service_save():
     if original and original != name:
         _cascade_across_configs(agent, lambda c: _retarget_service(c, original, name),
                                 already=cfg_filename if agent else target_path)
-    save_settings(
-        domains=settings['domains'], cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'], auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'], visible_tabs=settings['visible_tabs'],
-        managed_middlewares=ledger,
-    )
+    _save_edit_dicts(managed_middlewares=ledger)
     logger.info(f"Service {name!r} saved by {request.remote_addr}")
     add_notification('success', f'Service {name} saved', category='config')
     if agent:
@@ -1766,6 +1889,7 @@ def api_service_save():
 @app.route('/api/services/<path:name>', methods=['DELETE'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_service_delete(name):
     bare     = str(name).split('@')[0]
     agent_id, agent, err = _svc_agent_ctx()
@@ -1847,12 +1971,7 @@ def api_service_delete(name):
         else:
             create_backup(where)
             save_config(_strip_empty_sections(config), where)
-    save_settings(
-        domains=settings['domains'], cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'], auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'], visible_tabs=settings['visible_tabs'],
-        managed_middlewares=ledger,
-    )
+    _save_edit_dicts(managed_middlewares=ledger)
     logger.info(f"Service {bare!r} deleted by {request.remote_addr}")
     add_notification('warning', f'Service {bare} deleted', category='config')
     if agent:
@@ -1885,24 +2004,21 @@ def _owned_parent_services(agent_id: str = '') -> list:
 
 
 def _prune_service_ledger(agent_id: str = ''):
-    settings = load_settings()
-    ledger   = settings.get('managed_middlewares') or {}
+    ledger = load_settings().get('managed_middlewares') or {}
     if not any(isinstance(k, str) and 'svc::' in k for k in ledger):
         return
-    if _get_config_parse_errors():
-        return
-    configs = [load_config(p) for p in env.CONFIG_PATHS]
-    if not any(cfg for cfg in configs):
-        return
-    kept, dropped = _svc_own.prune(ledger, configs, agent_id)
-    if not dropped:
-        return
-    save_settings(
-        domains=settings['domains'], cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'], auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'], visible_tabs=settings['visible_tabs'],
-        managed_middlewares=kept,
-    )
+    with _locks.config_edit_lock(f'config:agent:{agent_id}' if agent_id else 'config:local'):
+        if _get_config_parse_errors():
+            return
+        configs = [load_config(p) for p in env.CONFIG_PATHS]
+        if not any(cfg for cfg in configs):
+            return
+
+        def prune(current):
+            kept, dropped = _svc_own.prune(current.get('managed_middlewares') or {}, configs, agent_id)
+            return {'managed_middlewares': kept} if dropped else None
+
+        _settings.modify_settings(prune)
 
 
 @app.route('/api/traefik/services')
@@ -1937,10 +2053,18 @@ def api_middlewares():
 @app.route('/api/manager/router-names')
 @login_required
 def api_manager_router_names():
-    config = load_config()
+    server = str(request.args.get('server', '')).strip()
+    if server:
+        agent = _agent_by_id(server)
+        if not agent:
+            return jsonify({'error': 'Unknown server'}), 404
+        configs = list(_agent_load_configs(agent).values())
+    else:
+        configs = [load_config()]
     names = set()
-    for proto in ('http', 'tcp', 'udp'):
-        names.update(config.get(proto, {}).get('routers', {}).keys())
+    for config in configs:
+        for proto in ('http', 'tcp', 'udp'):
+            names.update(((config or {}).get(proto) or {}).get('routers', {}).keys())
     return jsonify(list(names))
 
 
@@ -1973,9 +2097,7 @@ def _cs_age_text(seconds: int) -> str:
     return f"{minutes} minute{'s' if minutes != 1 else ''}"
 
 
-@app.route('/api/crowdsec/decisions')
-@login_required
-def api_cs_decisions():
+def _cs_decisions_gate():
     lapi = _cs_lapi_url()
     key  = _cs_api_key()
     if not lapi:
@@ -1983,58 +2105,90 @@ def api_cs_decisions():
     if not key and not _cs_has_cert():
         return jsonify({'error': 'No bouncer API key or client certificate. CrowdSec only accepts a bouncer key '
                                  'or a TLS client certificate on /v1/decisions, the machine token is refused there'}), 503
+    return None
+
+
+def _cs_active_decisions(force_full: bool = False):
+    lapi = _cs_lapi_url()
+    key  = _cs_api_key()
+    all_decisions = None
+    stale_note = ''
+    if _crowd._cs_stream_cache.get('streamable', True):
+        try:
+            all_decisions, _mode = _crowd.cs_decisions_stream(force_full=force_full)
+            if str(_mode).startswith('stale:'):
+                _, _age, _why = str(_mode).split(':', 2)
+                stale_note = (f'CrowdSec has not answered for {_cs_age_text(int(_age))}, so these '
+                              f'decisions are the last ones read and may be out of date. {_why}')
+        except CrowdSecUnavailable as e:
+            if 'HTTP 404' in str(e) or 'HTTP 405' in str(e):
+                logger.info("CrowdSec LAPI has no /v1/decisions/stream, falling back to the paged walk")
+                _crowd._cs_stream_cache['streamable'] = False
+                all_decisions = None
+            else:
+                raise
+    if all_decisions is None:
+        all_decisions = []
+        cursor = 0
+        for _page in range(CS_MAX_PAGES):
+            try:
+                chunk = _cs_request_strict('GET', f'/v1/decisions?limit={CS_PAGE_SIZE}&id_gt={cursor}',
+                                           lapi=lapi, key=key)
+            except CrowdSecUnavailable:
+                if all_decisions:
+                    logger.warning(f"CrowdSec decisions walk failed at page {_page + 1}, "
+                                   f"returning the {len(all_decisions)} rows already read")
+                    break
+                raise
+            if not isinstance(chunk, list) or not chunk:
+                break
+            all_decisions.extend(chunk)
+            ids = [d.get('id') for d in chunk if isinstance(d.get('id'), int)]
+            if not ids:
+                break
+            cursor = max(ids)
+            if len(chunk) < CS_PAGE_SIZE:
+                break
+    now = datetime.now(timezone.utc)
+    active = []
+    for d in all_decisions:
+        until = d.get('until')
+        if until:
+            try:
+                exp = datetime.fromisoformat(until.replace('Z', '+00:00'))
+                if exp < now:
+                    continue
+            except Exception:
+                pass
+        active.append(d)
+    return active, stale_note
+
+
+def _cs_origin_key(d: dict) -> str:
+    return str(d.get('origin') or '').strip().lower()
+
+
+def _cs_is_subscribed(d: dict) -> bool:
+    return _cs_origin_key(d) in ('capi', 'lists')
+
+
+def _cs_is_own(d: dict) -> bool:
+    return not _cs_is_subscribed(d)
+
+
+def _cs_is_byhand(d: dict) -> bool:
+    return _cs_origin_key(d) in ('cscli', 'manual')
+
+
+@app.route('/api/crowdsec/decisions')
+@login_required
+def api_cs_decisions():
+    gate = _cs_decisions_gate()
+    if gate:
+        return gate
     force_full = request.args.get('full') in ('1', 'true', 'yes')
     try:
-        all_decisions = None
-        stale_note = ''
-        if _crowd._cs_stream_cache.get('streamable', True):
-            try:
-                all_decisions, _mode = _crowd.cs_decisions_stream(force_full=force_full)
-                if str(_mode).startswith('stale:'):
-                    _, _age, _why = str(_mode).split(':', 2)
-                    stale_note = (f'CrowdSec has not answered for {_cs_age_text(int(_age))}, so these '
-                                  f'decisions are the last ones read and may be out of date. {_why}')
-            except CrowdSecUnavailable as e:
-                if 'HTTP 404' in str(e) or 'HTTP 405' in str(e):
-                    logger.info("CrowdSec LAPI has no /v1/decisions/stream, falling back to the paged walk")
-                    _crowd._cs_stream_cache['streamable'] = False
-                    all_decisions = None
-                else:
-                    raise
-        if all_decisions is None:
-            all_decisions = []
-            cursor = 0
-            for _page in range(CS_MAX_PAGES):
-                try:
-                    chunk = _cs_request_strict('GET', f'/v1/decisions?limit={CS_PAGE_SIZE}&id_gt={cursor}',
-                                               lapi=lapi, key=key)
-                except CrowdSecUnavailable:
-                    if all_decisions:
-                        logger.warning(f"CrowdSec decisions walk failed at page {_page + 1}, "
-                                       f"returning the {len(all_decisions)} rows already read")
-                        break
-                    raise
-                if not isinstance(chunk, list) or not chunk:
-                    break
-                all_decisions.extend(chunk)
-                ids = [d.get('id') for d in chunk if isinstance(d.get('id'), int)]
-                if not ids:
-                    break
-                cursor = max(ids)
-                if len(chunk) < CS_PAGE_SIZE:
-                    break
-        now = datetime.now(timezone.utc)
-        active = []
-        for d in all_decisions:
-            until = d.get('until')
-            if until:
-                try:
-                    exp = datetime.fromisoformat(until.replace('Z', '+00:00'))
-                    if exp < now:
-                        continue
-                except Exception:
-                    pass
-            active.append(d)
+        active, stale_note = _cs_active_decisions(force_full)
         if stale_note:
             logger.warning(f"CrowdSec decisions served from a stale cache: {stale_note}")
             resp = jsonify(active)
@@ -2047,47 +2201,209 @@ def api_cs_decisions():
         logger.exception("CrowdSec decisions error")
         return jsonify({'error': str(e)}), 500
 
+CS_SEARCH_PER_DEFAULT = 20
+CS_SEARCH_PER_MAX = 200
+
+
+@app.route('/api/crowdsec/decisions/search')
+@login_required
+def api_cs_decisions_search():
+    gate = _cs_decisions_gate()
+    if gate:
+        return gate
+    try:
+        active, stale_note = _cs_active_decisions()
+    except CrowdSecUnavailable as e:
+        return jsonify({'error': str(e)}), 502
+    except Exception as e:
+        logger.exception("CrowdSec decisions search error")
+        return jsonify({'error': str(e)}), 500
+
+    q          = request.args.get('q', '').strip().lower()
+    origin_f   = request.args.get('origin', '').strip()
+    type_f     = request.args.get('type', '').strip().lower()
+    ip_f       = request.args.get('ip', '').strip()
+    scenario_f = request.args.get('scenario', '').strip()
+    try:
+        page = int(request.args.get('page', 1))
+    except ValueError:
+        page = 1
+    page = max(1, page)
+    try:
+        per = int(request.args.get('per', CS_SEARCH_PER_DEFAULT))
+    except ValueError:
+        per = CS_SEARCH_PER_DEFAULT
+    per = max(1, min(CS_SEARCH_PER_MAX, per))
+
+    def _match(d, use_origin=True, use_type=True, use_ip=True, use_scenario=True, use_q=True):
+        if use_origin and origin_f:
+            if origin_f == 'subscribed':
+                ok = _cs_is_subscribed(d)
+            elif origin_f == 'own':
+                ok = _cs_is_own(d)
+            elif origin_f == 'byhand':
+                ok = _cs_is_byhand(d)
+            else:
+                ok = _cs_origin_key(d) == origin_f.strip().lower()
+            if not ok:
+                return False
+        if use_type and type_f and str(d.get('type') or '').strip().lower() != type_f:
+            return False
+        if use_ip and ip_f and d.get('value') != ip_f:
+            return False
+        if use_scenario and scenario_f and d.get('scenario') != scenario_f:
+            return False
+        if use_q and q:
+            hay = ' '.join([str(d.get('value') or ''), str(d.get('scenario') or ''), _cs_origin_key(d),
+                            str(d.get('scope') or ''), str(d.get('type') or '')]).lower()
+            if q not in hay:
+                return False
+        return True
+
+    rows = [d for d in active if _match(d)]
+    rows.sort(key=lambda d: (0 if _cs_is_own(d) else 1, -(d.get('id') or 0)))
+    total = len(rows)
+    per_pages = -(-total // per) if total else 0
+    pages = max(1, per_pages)
+    page  = min(page, pages)
+    start = (page - 1) * per
+    page_rows = rows[start:start + per]
+    facet_totals = {
+        'origin': sum(1 for d in active if _match(d, use_type=False, use_ip=False, use_scenario=False)),
+        'type': sum(1 for d in active if _match(d, use_origin=False, use_ip=False, use_scenario=False)),
+    }
+    resp = jsonify({'rows': page_rows, 'total': total, 'page': page, 'pages': pages,
+                    'per': per, 'facet_totals': facet_totals})
+    if stale_note:
+        resp.headers['X-CS-Stale'] = stale_note
+    return resp
+
+CS_SUMMARY_ROW_CAP = 500
+CS_SUMMARY_ALERT_KEYS = ('id', 'uuid', 'scenario', 'scenario_version', 'events_count', 'capacity',
+                         'leakspeed', 'simulated', 'machine_id', 'message', 'start_at', 'stop_at',
+                         'created_at', 'source', 'meta')
+
+
+@app.route('/api/crowdsec/summary')
+@login_required
+def api_cs_summary():
+    lapi = _cs_lapi_url()
+    if not lapi:
+        return jsonify({'error': 'CrowdSec not configured'}), 503
+    force_full = request.args.get('full') in ('1', 'true', 'yes')
+    key = _cs_api_key()
+
+    decisions_block = {'ok': True, 'error': '', 'stale': '', 'total': 0, 'own': 0, 'subscribed': 0,
+                       'wide': 0, 'origins': {}, 'types': {}, 'rows': [], 'rows_more': 0}
+    active = []
+    if not key and not _cs_has_cert():
+        decisions_block['ok'] = False
+        decisions_block['error'] = ('No bouncer API key or client certificate. CrowdSec only accepts a bouncer key '
+                                    'or a TLS client certificate on /v1/decisions, the machine token is refused there')
+    else:
+        try:
+            active, stale_note = _cs_active_decisions(force_full)
+            decisions_block['stale'] = stale_note
+        except CrowdSecUnavailable as e:
+            decisions_block['ok'] = False
+            decisions_block['error'] = str(e)
+        except Exception as e:
+            logger.exception("CrowdSec summary decisions error")
+            decisions_block['ok'] = False
+            decisions_block['error'] = str(e)
+
+    if decisions_block['ok']:
+        origins   = {}
+        types     = {}
+        own_rows  = []
+        own_count = 0
+        subscribed_count = 0
+        wide_count = 0
+        for d in active:
+            okey = _cs_origin_key(d)
+            origins[okey] = origins.get(okey, 0) + 1
+            tkey = str(d.get('type') or '').strip().lower()
+            types[tkey] = types.get(tkey, 0) + 1
+            if _cs_is_subscribed(d):
+                subscribed_count += 1
+            else:
+                own_count += 1
+                if okey != 'crowdsec':
+                    own_rows.append(d)
+            if str(d.get('scope') or '') != 'Ip':
+                wide_count += 1
+        own_rows.sort(key=lambda d: -(d.get('id') or 0))
+        decisions_block['total'] = len(active)
+        decisions_block['own'] = own_count
+        decisions_block['subscribed'] = subscribed_count
+        decisions_block['wide'] = wide_count
+        decisions_block['origins'] = origins
+        decisions_block['types'] = types
+        decisions_block['rows'] = own_rows[:CS_SUMMARY_ROW_CAP]
+        decisions_block['rows_more'] = max(0, len(own_rows) - CS_SUMMARY_ROW_CAP)
+
+    alert_limit = cs_alert_limit()
+    alerts_block = {'ok': True, 'error': '', 'status': 200, 'limit': alert_limit, 'capped': False, 'rows': []}
+    alert_rows_raw = []
+    try:
+        alert_rows_raw, _mode = _crowd.cs_alerts(alert_limit, force_full=force_full)
+        alerts_block['capped'] = bool(alert_limit and len(alert_rows_raw) >= alert_limit)
+    except CrowdSecUnavailable as e:
+        alerts_block['ok'] = False
+        alerts_block['error'] = str(e)
+        alerts_block['status'] = getattr(e, 'status', 0) or 0
+    except Exception as e:
+        logger.exception("CrowdSec summary alerts error")
+        alerts_block['ok'] = False
+        alerts_block['error'] = str(e)
+        alerts_block['status'] = 0
+
+    if alerts_block['ok']:
+        handled_values = set()
+        if decisions_block['ok']:
+            handled_values = {d.get('value') for d in active if d.get('scope') in ('Ip', 'Range')}
+        trimmed = []
+        for a in alert_rows_raw:
+            row = {k: a[k] for k in CS_SUMMARY_ALERT_KEYS if k in a}
+            if decisions_block['ok']:
+                src = a.get('source') or {}
+                row['handled'] = (src.get('ip') or src.get('value')) in handled_values
+            trimmed.append(row)
+        trimmed.sort(key=lambda r: -(r.get('id') or 0))
+        alerts_block['rows'] = trimmed
+
+    dec_ids = sorted({d.get('id') for d in active if isinstance(d.get('id'), int)}) if decisions_block['ok'] else []
+    alert_ids = (sorted({a.get('id') for a in alert_rows_raw if isinstance(a.get('id'), int)})
+                if alerts_block['ok'] else [])
+    raw = (','.join(str(i) for i in dec_ids) + '|' + ','.join(str(i) for i in alert_ids) + '|' +
+          ('1' if decisions_block['ok'] else '0') + ('1' if alerts_block['ok'] else '0'))
+    version = hashlib.sha1(raw.encode('utf-8')).hexdigest()[:16]
+
+    req_version = request.args.get('version', '')
+    if req_version and req_version == version:
+        return jsonify({'version': version, 'unchanged': True})
+    return jsonify({'version': version, 'decisions': decisions_block, 'alerts': alerts_block})
+
 @app.route('/api/crowdsec/alerts')
 @login_required
 def api_cs_alerts():
     lapi = _cs_lapi_url()
     if not (lapi and (_cs_api_key() or _cs_has_machine())):
         return jsonify({'error': 'CrowdSec not configured'}), 503
+    force_full = request.args.get('full') in ('1', 'true', 'yes')
+    _limit = cs_alert_limit()
     try:
-        if _cs_has_machine():
-            token = _cs_jwt(lapi)
-            if not token:
-                return jsonify({'error': 'CrowdSec machine login failed - check CROWDSEC_MACHINE_ID / CROWDSEC_MACHINE_PASSWORD '
-                                         'or the client certificate'}), 502
-            headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
-        else:
-            headers = {'X-Api-Key': _cs_api_key(), 'Accept': 'application/json'}
-        _limit = cs_alert_limit()
-        _url = f"{lapi.rstrip('/')}/v1/alerts?limit={_limit}&with_decisions=false"
-        resp = requests.get(_url, headers=headers, timeout=cs_timeout(), **_cs_tls_kwargs())
-        if resp.status_code == 401 and _cs_has_machine():
-            logger.info("CrowdSec refused the machine token on /v1/alerts, logging in again")
-            _crowd.cs_jwt_reset()
-            token = _cs_jwt(lapi)
-            if token:
-                headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
-                resp = requests.get(_url, headers=headers, timeout=cs_timeout(), **_cs_tls_kwargs())
-        if not resp.ok:
-            try:
-                msg = resp.json().get('message') or resp.json().get('error') or resp.text
-            except Exception:
-                msg = resp.text
-            return jsonify({'error': f'LAPI {resp.status_code}: {msg}'}), resp.status_code
-        alerts = resp.json() if resp.content else []
-        if not isinstance(alerts, list):
-            alerts = []
-        out = jsonify(alerts)
-        out.headers['X-CS-Alert-Limit'] = str(_limit)
-        out.headers['X-CS-Alert-Capped'] = '1' if (_limit and len(alerts) >= _limit) else '0'
-        return out
+        alerts, _mode = _crowd.cs_alerts(_limit, force_full=force_full)
+    except CrowdSecUnavailable as e:
+        status = getattr(e, 'status', 0) or 0
+        return jsonify({'error': str(e)}), (status if status >= 400 else 502)
     except Exception as e:
         logger.exception("CrowdSec alerts error")
         return jsonify({'error': str(e)}), 500
+    out = jsonify(alerts)
+    out.headers['X-CS-Alert-Limit'] = str(_limit)
+    out.headers['X-CS-Alert-Capped'] = '1' if (_limit and len(alerts) >= _limit) else '0'
+    return out
 
 @app.route('/api/crowdsec/decisions', methods=['POST'])
 @csrf_protect
@@ -2124,6 +2440,7 @@ def api_cs_add_decision():
     if result is None:
         return jsonify({'error': 'Failed to add decision - check LAPI permissions'}), 502
     _crowd.cs_stream_reset()
+    _crowd.cs_alerts_reset()
     return jsonify({'ok': True})
 
 @app.route('/api/crowdsec/decisions/<int:decision_id>', methods=['DELETE'])
@@ -2354,6 +2671,9 @@ def api_static_config_get():
         return jsonify({'raw': raw, 'parsed': parsed, 'path': body.get('path', '')})
     path = _readable_config_path(_get_static_config_path())
     if not path or not os.path.exists(path):
+        refused = _settings.refused_path('static')
+        if refused:
+            return jsonify({'error': f'Static config path refused: {refused}'}), 404
         return jsonify({'error': 'Static config not found or STATIC_CONFIG_PATH not set'}), 404
     try:
         with open(path, 'r') as f:
@@ -2368,9 +2688,13 @@ def api_static_config_get():
 @app.route('/api/static/config', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_static_config_save():
     path = _get_static_config_path()
     if not path:
+        refused = _settings.refused_path('static')
+        if refused:
+            return jsonify({'error': f'Static config path refused: {refused}'}), 400
         return jsonify({'error': 'STATIC_CONFIG_PATH not configured'}), 400
     safe_path = _safe_file_path(path)
     if not safe_path:
@@ -3292,6 +3616,7 @@ def api_plugin_catalog():
 @app.route('/api/plugins/install', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_plugins_install():
     data = request.get_json(silent=True) or {}
     static_yaml = (data.get('static_yaml') or '').strip()
@@ -3433,15 +3758,11 @@ def api_plugins_install():
     return jsonify(result)
 
 
-@app.route('/api/traefik/certs')
-@login_required
-def api_certs():
+def _acme_certs_from_paths(acme_paths):
     import json as _json
-    certs = []
+    certs  = []
     errors = []
-
-    acme_paths = _settings.get_acme_json_paths()
-    found_any  = False
+    found_any = False
     for configured in acme_paths:
         acme_path = _readable_config_path(configured)
         if not (acme_path and os.path.exists(acme_path)):
@@ -3462,10 +3783,177 @@ def api_certs():
                                   'sans': domain.get('sans', []) or [], 'not_after': not_after,
                                   'source': os.path.basename(acme_path)})
         except PermissionError:
-            errors.append(f'Permission denied reading {acme_path}. Run: chmod o+r {acme_path}')
+            errors.append(f'Permission denied reading {acme_path}. Run Traefik Manager as the user that owns it, do not chmod it.')
         except Exception as e:
             logger.exception("Error reading acme.json")
             errors.append(f'{os.path.basename(acme_path)}: {e}')
+    return certs, errors, found_any
+
+
+def _host_cert_resolvers():
+    path = _get_static_config_path()
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r') as f:
+            data = _yaml_safe.load(f) or {}
+    except Exception:
+        logger.debug("Failed to read certificatesResolvers from static config", exc_info=True)
+        return None
+    resolvers = data.get('certificatesResolvers')
+    if not isinstance(resolvers, dict) or not resolvers:
+        return None
+    return [str(k).strip() for k in resolvers if str(k).strip()]
+
+
+def _agent_cert_resolvers_or_none(agent):
+    try:
+        resp = _agent_request(agent, 'GET', '/api/static')
+        if resp.status_code != 200:
+            return None
+        data = _yaml_safe.load((resp.json() or {}).get('content', '')) or {}
+    except Exception:
+        logger.debug("Failed to read agent certificatesResolvers", exc_info=True)
+        return None
+    resolvers = data.get('certificatesResolvers')
+    if not isinstance(resolvers, dict) or not resolvers:
+        return None
+    return [str(k).strip() for k in resolvers if str(k).strip()]
+
+
+@app.route('/api/certs/usage')
+@login_required
+def api_certs_usage():
+    server  = str(request.args.get('server', '')).strip()
+    exclude = [str(i).strip() for i in request.args.getlist('exclude') if str(i).strip()][:500]
+    if server:
+        agent = _agent_by_id(server)
+        if not agent:
+            return jsonify({'error': 'Unknown server'}), 404
+        try:
+            resp  = _agent_request(agent, 'GET', '/api/traefik/certs')
+            certs = (resp.json() or {}).get('certs') or [] if resp.ok else []
+        except Exception:
+            certs = []
+        payload   = _agent_routes_payload(agent, server)
+        apps      = payload.get('apps') or []
+        configs   = list(_agent_load_configs(agent).values())
+        resolvers = _agent_cert_resolvers_or_none(agent)
+        ok        = not payload.get('configErrors')
+        result    = _cert_usage.analyze(certs, apps, configs, resolvers, routers_ok=ok, configs_ok=ok,
+                                        exclude_ids=exclude)
+        return jsonify(result)
+
+    certs, _errors, _found = _acme_certs_from_paths(_settings.get_acme_json_paths())
+    certs.extend(_certs_from_tls_configs())
+    complete = []
+    apps, _mws = _build_all_apps(include_external=True, include_internal=True, complete=complete)
+    configs  = [_cfg._load_config_display(p) for p in env.CONFIG_PATHS]
+    ok       = not complete
+    result   = _cert_usage.analyze(certs, apps, configs, _host_cert_resolvers(),
+                                   routers_ok=ok, configs_ok=not _get_config_parse_errors(),
+                                   exclude_ids=exclude)
+    return jsonify(result)
+
+
+def _host_cert_manage_state():
+    paths    = _settings.get_acme_json_paths()
+    resolved = [p for p in (_readable_config_path(x) for x in paths) if p and os.path.isfile(p)]
+    writable = bool(resolved) and all(_acme.writable(p) for p in resolved)
+    method   = _get_restart_method()
+    restart  = method in ('proxy', 'socket', 'poison-pill')
+    if not resolved:
+        reason = (f"acme.json path refused: {_settings.refused_path('acme')}" if _settings.refused_path('acme')
+                  else 'acme.json is not mounted')
+    elif not writable:
+        reason = 'acme.json is mounted read only'
+    elif not restart:
+        reason = 'no restart method is configured, and Traefik only reads acme.json at startup'
+    else:
+        reason = ''
+    return {'available': writable and restart, 'writable': writable,
+            'restart_method': method if restart else '', 'reason': reason, 'paths': resolved}
+
+
+@app.route('/api/certs/manage')
+@login_required
+def api_certs_manage():
+    server = str(request.args.get('server', '')).strip()
+    if not server:
+        return jsonify(_host_cert_manage_state())
+    agent = _agent_by_id(server)
+    if not agent:
+        return jsonify({'error': 'Unknown server'}), 404
+    try:
+        resp = _agent_request(agent, 'GET', '/api/traefik/certs/status')
+        if resp.status_code != 200:
+            return jsonify({'available': False, 'writable': False, 'restart_method': '',
+                            'reason': 'this agent is too old to manage certificates', 'paths': []})
+        state = resp.json() or {}
+    except Exception as e:
+        return jsonify({'available': False, 'writable': False, 'restart_method': '',
+                        'reason': str(e), 'paths': []})
+    state['available'] = bool(state.get('available'))
+    return jsonify(state)
+
+
+@app.route('/api/certs/delete', methods=['POST'])
+@csrf_protect
+@login_required
+def api_certs_delete():
+    data   = request.get_json(silent=True) or {}
+    server = str(data.get('server', '')).strip()
+    wanted = [(str(c.get('resolver', '')), str(c.get('main', '')))
+              for c in (data.get('certs') or []) if isinstance(c, dict) and c.get('main')]
+    if not wanted:
+        return jsonify({'error': 'Nothing was selected'}), 400
+    if server:
+        agent = _agent_by_id(server)
+        if not agent:
+            return jsonify({'error': 'Unknown server'}), 404
+        try:
+            resp = _agent_request(agent, 'POST', '/api/traefik/certs/delete',
+                                  json={'certs': [{'resolver': r, 'main': m} for r, m in wanted]})
+            return jsonify(resp.json() or {}), resp.status_code
+        except Exception as e:
+            return jsonify({'error': str(e)}), 502
+
+    state = _host_cert_manage_state()
+    if not state['available']:
+        return jsonify({'error': state['reason'] or 'Certificates cannot be edited here'}), 403
+
+    try:
+        removed, saved = _acme.remove_many(state['paths'], wanted)
+    except _acme.AcmeStorePartial as e:
+        ok, err = trigger_traefik_restart()
+        logger.error(f"Certificate removal stopped partway: {e}")
+        add_notification('error', f"Certificate removal stopped partway: {e}", category='traefik')
+        return jsonify({'error': str(e), 'removed': e.removed, 'partial': True,
+                        'backup': os.path.basename(e.backup or ''),
+                        'restarted': ok, 'restart_error': '' if ok else err}), 500
+    except _acme.AcmeStoreError as e:
+        return jsonify({'error': str(e)}), e.status
+    except OSError as e:
+        logger.exception("acme.json write failed")
+        return jsonify({'error': f'Could not write acme.json: {e}'}), 500
+    if not removed:
+        return jsonify({'error': 'No matching certificate was found'}), 404
+
+    ok, err = trigger_traefik_restart()
+    logger.info(f"Removed {removed} certificate(s) from acme.json, backup at {saved}")
+    add_notification('warning', f"{removed} certificate(s) removed from acme.json", category='traefik')
+    return jsonify({'ok': True, 'removed': removed, 'backup': os.path.basename(saved or ''),
+                    'restarted': ok, 'restart_error': '' if ok else err})
+
+
+@app.route('/api/traefik/certs')
+@login_required
+def api_certs():
+    certs = []
+    errors = []
+
+    acme_paths = _settings.get_acme_json_paths()
+    certs, errors, found_any = _acme_certs_from_paths(acme_paths)
     if not acme_paths or not found_any:
         errors.append('Set ACME_JSON_PATH env var or configure the path in Settings. '
                       'Several files can be given comma-separated, or point it at a directory.')
@@ -3480,11 +3968,17 @@ def api_certs():
 @login_required
 def api_logs():
     try:
-        lines_req = min(int(request.args.get('lines', 100)), 1000)
+        lines_req = int(request.args.get('lines', 100))
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid lines parameter'}), 400
+    if lines_req < 1:
+        return jsonify({'error': 'Invalid lines parameter'}), 400
+    lines_req = min(lines_req, 1000)
     log_path = _readable_config_path(_get_access_log_path())
     if not log_path or not os.path.exists(log_path):
+        refused = _settings.refused_path('log')
+        if refused:
+            return jsonify({'error': f'Access log path refused: {refused}', 'lines': []})
         return jsonify({'error': 'Access log not found. Set ACCESS_LOG_PATH env var or configure the path in Settings.', 'lines': []})
     try:
         lines = []
@@ -3514,6 +4008,10 @@ def list_backups():
     ensure_backup_dir()
     static_path = _get_static_config_path()
     static_base = os.path.basename(static_path) if static_path else None
+    acme_paths  = _host_cert_manage_state()['paths']
+    acme_bases  = (set(_acme.backup_keys(acme_paths).values())
+                   | {os.path.basename(p) for p in acme_paths}
+                   | {os.path.basename(p) for p in _settings.get_acme_json_paths()})
     _name_re    = re.compile(r'^(.+)\.(\d{8}_\d{6})\.bak$')
     backups = []
     for f in os.listdir(BACKUP_DIR):
@@ -3523,7 +4021,12 @@ def list_backups():
             m    = _name_re.match(f)
             orig   = m.group(1) if m else ''
             ts_str = m.group(2) if m else ''
-            kind = 'static' if static_base and orig == static_base else 'routes'
+            if orig in acme_bases:
+                kind = 'certs'
+            elif static_base and orig == static_base:
+                kind = 'static'
+            else:
+                kind = 'routes'
             backups.append({
                 'name':     f,
                 'size':     st.st_size,
@@ -3536,7 +4039,7 @@ def list_backups():
         del b['sort_key']
     return backups
 
-_BACKUP_RE = re.compile(r'^[a-zA-Z0-9._ -]+\.yml\.\d{8}_\d{6}\.bak$')
+_BACKUP_RE = re.compile(r'^[a-zA-Z0-9._ -]+\.(yml|yaml|json)\.\d{8}_\d{6}\.bak$')
 
 def _validated_backup_path(filename: str) -> str:
     if not _BACKUP_RE.match(filename):
@@ -3615,10 +4118,13 @@ def api_git_backup_test():
         return jsonify({'ok': False, 'error': 'No repository URL configured'}), 400
     if not _valid_git_url(repo_url):
         return jsonify({'ok': False, 'error': 'Unsupported URL - use https://, http://, ssh:// or git://'}), 400
+    if not _ssrf_ok(repo_url):
+        return jsonify({'ok': False, 'error': 'Target address not allowed'}), 400
     creds = {'username': username, 'token': token} if token else None
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
-        _, err, rc = _git_run(['ls-remote', '--quiet', '--', repo_url], cwd=tmpdir, credentials=creds)
+        _, err, rc = _git_run(['ls-remote', '--quiet', '--', repo_url], cwd=tmpdir, credentials=creds,
+                              extra_config=['http.followRedirects=false'])
     if rc == 0:
         return jsonify({'ok': True})
     safe_err = err.replace(token, '***') if token else err
@@ -3680,9 +4186,21 @@ def api_git_backup_diff(sha):
         return jsonify({'error': str(e)}), 500
 
 
+def _write_restored(path, content):
+    tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        with open(tmp, 'w') as f:
+            f.write(content)
+        _cfg._replace_or_copy(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 @app.route('/api/backup/git/restore/<sha>', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_git_backup_restore(sha):
     if not re.match(r'^[0-9a-f]{7,40}$', sha):
         abort(400)
@@ -3715,18 +4233,21 @@ def api_git_backup_restore(sha):
         sp = _get_static_config_path()
         if sp:
             create_backup(sp)
+        keys  = _back.config_keys()
+        bases = [os.path.basename(p) for p in env.CONFIG_PATHS]
         for p in env.CONFIG_PATHS:
-            base    = os.path.basename(p)
-            content = _git_show_first(repo_dir, sha, [f'dynamic/{base}', base])
+            base       = os.path.basename(p)
+            candidates = [f'dynamic/{keys[p]}']
+            if keys[p] == base and bases.count(base) == 1:
+                candidates.append(base)
+            content = _git_show_first(repo_dir, sha, candidates)
             if content:
-                with open(p, 'w') as f:
-                    f.write(content)
+                _write_restored(p, content)
         if sp:
             base    = os.path.basename(sp)
             content = _git_show_first(repo_dir, sha, [f'static/{base}', base])
             if content:
-                with open(sp, 'w') as f:
-                    f.write(content)
+                _write_restored(sp, content)
         add_notification('warning', f'Restored from git commit {sha[:8]}', category='backup')
         return jsonify({'ok': True})
     except Exception as e:
@@ -3805,13 +4326,7 @@ def api_notifications_read():
             marker = int(data.get('id'))
         except (TypeError, ValueError):
             return jsonify({'ok': False, 'message': 'Missing id or all'}), 400
-    s = load_settings()
-    save_settings(
-        domains=s['domains'], cert_resolver=s['cert_resolver'],
-        traefik_api_url=s['traefik_api_url'], auth_enabled=s['auth_enabled'],
-        password_hash=s['password_hash'], visible_tabs=s['visible_tabs'],
-        notifications_read_until=max(0, marker),
-    )
+    update_settings(notifications_read_until=max(0, marker))
     return jsonify({'ok': True, 'read_until': max(0, marker)})
 
 
@@ -3952,15 +4467,7 @@ def _apply_channel_fields(data, base, require_kind):
 
 
 def _save_channels(settings, channels):
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'],
-        visible_tabs=settings['visible_tabs'],
-        notification_channels=channels,
-    )
+    update_settings(notification_channels=channels)
 
 
 def _stored_channel(channel_id, fallback):
@@ -4087,6 +4594,7 @@ def api_tls_options_list():
 @app.route('/api/tls-options', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_tls_options_save():
     data = request.get_json(silent=True) or {}
     name = data.get('name', '').strip()
@@ -4146,6 +4654,7 @@ def api_tls_options_save():
 @app.route('/api/tls-options/<name>', methods=['DELETE'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_tls_options_delete(name):
     config_file = request.args.get('configFile', '').strip()
     server = request.args.get('server', '').strip()
@@ -4187,28 +4696,62 @@ def api_backups():
 @limiter.limit("10 per minute")
 @csrf_protect
 @login_required
+@_config_edit
 def api_restore(filename):
     try:
         path = _validated_backup_path(filename)
         if not os.path.exists(path):
             return jsonify({'error': 'Backup not found'}), 404
-        bname = filename
-        target_path = None
-        for p in env.CONFIG_PATHS:
-            if bname.startswith(os.path.basename(p) + '.'):
-                target_path = p
-                break
+        stamped = re.match(r'^(.+)\.\d{8}_\d{6}\.bak$', filename)
+        orig = stamped.group(1) if stamped else ''
+        keys    = _back.config_keys()
+        by_stem = [p for p in env.CONFIG_PATHS if _back.backup_stem(keys[p]) == orig]
+        by_base = [p for p in env.CONFIG_PATHS if os.path.basename(p) == orig]
+        if orig and not by_stem and len(by_base) > 1:
+            return jsonify({'error': f'{orig} matches more than one config file, '
+                                     'so this backup cannot be restored safely'}), 409
+        target_path = (by_stem or by_base or [None])[0]
         if target_path is None:
             static_path = _get_static_config_path()
-            if static_path and bname.startswith(os.path.basename(static_path) + '.'):
+            if static_path and os.path.basename(static_path) == orig:
                 target_path = static_path
+        acme_target = None
+        acme_key = None
+        if target_path is None and orig:
+            store_paths = _host_cert_manage_state()['paths']
+            for store_path, key in _acme.backup_keys(store_paths).items():
+                if key == orig:
+                    acme_target, acme_key = store_path, key
+                    break
+            if acme_target is None and sum(1 for p in store_paths if os.path.basename(p) == orig) > 1:
+                return jsonify({'error': f'{orig} matches more than one certificate store, '
+                                         'so this backup cannot be restored safely'}), 409
+        if acme_target:
+            state = _host_cert_manage_state()
+            if not state['available']:
+                return jsonify({'error': state['reason'] or 'acme.json cannot be written here'}), 403
+            with open(path, 'rb') as fh:
+                body = fh.read()
+            with _acme.store_lock():
+                current = _acme.snapshot(acme_target)
+                _acme.backup(acme_target, current, acme_key)
+                _acme.write_bytes_in_place(acme_target, body, restore=current)
+            ok, err = trigger_traefik_restart()
+            logger.info(f"Restored: {filename} -> {acme_target}")
+            add_notification('warning', f"Certificate store restored: {filename}", category='backup')
+            return jsonify({'success': True, 'restarted': ok, 'restart_error': '' if ok else err})
         if target_path is None:
             return jsonify({'error': f'No config file matches {filename!r}'}), 400
+        with open(path, 'rb') as fh:
+            restored = fh.read()
         create_backup(target_path)
-        shutil.copy2(path, target_path)
+        with open(target_path, 'wb') as fh:
+            fh.write(restored)
         logger.info(f"Restored: {filename} → {target_path}")
         add_notification('warning', f"Backup restored: {filename}", category='backup')
         return jsonify({'success': True})
+    except _acme.AcmeStoreError as e:
+        return jsonify({'error': str(e)}), e.status
     except Exception as e:
         logger.exception("Restore error")
         return jsonify({'error': str(e)}), 500
@@ -4338,6 +4881,12 @@ def api_save_settings():
         acme_json_path    = str(data.get('acme_json_path', '')).strip()
         access_log_path   = str(data.get('access_log_path', '')).strip()
         static_config_path = str(data.get('static_config_path', '')).strip()
+        for _kind, _label, _value in (('static', 'Static config path', static_config_path),
+                                      ('log', 'Access log path', access_log_path),
+                                      ('acme', 'acme.json path', acme_json_path)):
+            _problem = _settings.saved_path_problem(_kind, _value)
+            if _problem:
+                return jsonify({'error': f'{_label}: {_problem}'}), 400
         webhook_url          = str(data.get('webhook_url', '')).strip()
         webhook_type         = str(data.get('webhook_type', 'discord')).strip()
         webhook_username     = str(data.get('webhook_username', '')).strip()
@@ -4383,6 +4932,9 @@ def api_save_settings():
         if not crowdsec_machine_password:
             crowdsec_machine_password = existing.get('crowdsec_machine_password', '')
         if not traefik_api_password:
+            if (existing.get('traefik_api_password') and traefik_api_user
+                    and not _same_api_origin(traefik_api_url, existing.get('traefik_api_url', ''))):
+                return jsonify({'error': 'Re-enter the Traefik API password when changing the API URL'}), 400
             traefik_api_password = existing.get('traefik_api_password', '')
         if not git_backup_token:
             git_backup_token = existing.get('git_backup_token', '')
@@ -4462,11 +5014,15 @@ def api_settings_test_connection():
         return jsonify({'ok': False, 'error': 'Target address not allowed'}), 400
     u = str(data.get('user', '')).strip()
     p = str(data.get('password', '')).strip()
+    withheld = False
     if not p:
-        stored   = load_settings()
-        if not u:
-            u = stored.get('traefik_api_user', '')
-        p = stored.get('traefik_api_password', '')
+        stored = load_settings()
+        if _same_api_origin(url, stored.get('traefik_api_url', '')):
+            if not u:
+                u = stored.get('traefik_api_user', '')
+            p = stored.get('traefik_api_password', '')
+        else:
+            withheld = bool(stored.get('traefik_api_password'))
     auth = (u, p) if u and p else None
     logger.info(f"Connection test to {url!r} by {request.remote_addr}")
     try:
@@ -4475,7 +5031,9 @@ def api_settings_test_connection():
             info = resp.json()
             return jsonify({'ok': True, 'version': info.get('Version', '?')})
         if resp.status_code in (401, 403):
-            return jsonify({'ok': False, 'error': f'HTTP {resp.status_code} - check the API username and password'})
+            hint = (' - the saved password is only sent to the saved API URL, enter it to test this one'
+                    if withheld else ' - check the API username and password')
+            return jsonify({'ok': False, 'error': f'HTTP {resp.status_code}{hint}'})
         return jsonify({'ok': False, 'error': f'HTTP {resp.status_code} from {url}/api/version'})
     except requests.exceptions.SSLError as e:
         return jsonify({'ok': False, 'error': f'TLS verification failed - the API certificate is not trusted. Mount your CA into /etc/ssl/certs/ca-certificates.crt or set TRAEFIK_INSECURE_SKIP_VERIFY=true. ({str(e)[:120]})'})
@@ -4526,15 +5084,7 @@ def api_ui_prefs():
         return jsonify({'ok': False, 'message': 'ui_prefs must be an object'}), 400
     merged = dict(existing.get('ui_prefs', {}))
     merged.update(_settings.sanitize_ui_prefs(incoming))
-    save_settings(
-        domains=existing['domains'],
-        cert_resolver=existing['cert_resolver'],
-        traefik_api_url=existing['traefik_api_url'],
-        auth_enabled=existing['auth_enabled'],
-        password_hash=existing['password_hash'],
-        visible_tabs=existing['visible_tabs'],
-        ui_prefs=merged,
-    )
+    update_settings(ui_prefs=merged)
     return jsonify({'ok': True, 'ui_prefs': merged})
 
 
@@ -4547,16 +5097,7 @@ def api_save_theme():
         theme = str(data.get('default_theme', '')).strip().lower()
         if theme not in ('dark', 'light', 'system'):
             return jsonify({'success': False, 'error': 'Invalid theme'}), 400
-        existing = load_settings()
-        save_settings(
-            domains=existing['domains'],
-            cert_resolver=existing['cert_resolver'],
-            traefik_api_url=existing['traefik_api_url'],
-            auth_enabled=existing['auth_enabled'],
-            password_hash=existing['password_hash'],
-            visible_tabs=existing['visible_tabs'],
-            default_theme=theme,
-        )
+        update_settings(default_theme=theme)
         return jsonify({'success': True, 'default_theme': theme})
     except Exception:
         logger.exception("Theme save error")
@@ -4572,16 +5113,8 @@ def api_save_geoip():
         existing = load_settings()
         enabled  = bool(data['geoip_enabled']) if 'geoip_enabled' in data else existing.get('geoip_enabled', False)
         db_path  = str(data.get('geoip_db_path', existing.get('geoip_db_path', ''))).strip()
-        save_settings(
-            domains=existing['domains'],
-            cert_resolver=existing['cert_resolver'],
-            traefik_api_url=existing['traefik_api_url'],
-            auth_enabled=existing['auth_enabled'],
-            password_hash=existing['password_hash'],
-            visible_tabs=existing['visible_tabs'],
-            geoip_enabled=enabled,
-            geoip_db_path=db_path,
-        )
+        update_settings(geoip_enabled=enabled,
+                        geoip_db_path=db_path)
         return jsonify({'success': True, 'status': _geoip_status()})
     except Exception:
         logger.exception("GeoIP settings save error")
@@ -4610,16 +5143,8 @@ def api_save_route_health():
         return jsonify({'error': 'Interval must be a number of seconds'}), 400
     if interval not in _rh.INTERVALS:
         return jsonify({'error': 'Interval must be one of %s seconds' % ', '.join(str(i) for i in _rh.INTERVALS)}), 400
-    save_settings(
-        domains=existing['domains'],
-        cert_resolver=existing['cert_resolver'],
-        traefik_api_url=existing['traefik_api_url'],
-        auth_enabled=existing['auth_enabled'],
-        password_hash=existing['password_hash'],
-        visible_tabs=existing['visible_tabs'],
-        route_check_enabled=enabled,
-        route_check_interval=interval,
-    )
+    update_settings(route_check_enabled=enabled,
+                    route_check_interval=interval)
     return jsonify({'ok': True, 'enabled': enabled, 'interval': interval})
 
 
@@ -4645,7 +5170,7 @@ def _classify_ip(ip: str) -> str:
 @login_required
 def api_client_ip_diagnostic():
     orig        = request.environ.get('werkzeug.proxy_fix.orig') or {}
-    socket_peer = orig.get('REMOTE_ADDR', '') or ''
+    socket_peer = orig.get('REMOTE_ADDR', '') or request.environ.get('REMOTE_ADDR', '') or ''
     headers     = {
         'X-Forwarded-For':   request.headers.get('X-Forwarded-For', ''),
         'X-Real-IP':         request.headers.get('X-Real-IP', ''),
@@ -4665,6 +5190,8 @@ def api_client_ip_diagnostic():
         'headers':             headers,
         'forwarded_for_chain': xff_chain,
         'proxy_hops':          PROXY_FIX_HOPS,
+        'proxy_trusted':       env.peer_is_trusted(socket_peer),
+        'trusted_proxies':     env.trusted_proxies_list(),
         'classes':             classes,
     })
 
@@ -4676,16 +5203,7 @@ def api_save_backup_retention():
     try:
         data     = request.get_json() or {}
         keep     = max(0, int(data.get('backup_keep_count', 0)))
-        existing = load_settings()
-        save_settings(
-            domains=existing['domains'],
-            cert_resolver=existing['cert_resolver'],
-            traefik_api_url=existing['traefik_api_url'],
-            auth_enabled=existing['auth_enabled'],
-            password_hash=existing['password_hash'],
-            visible_tabs=existing['visible_tabs'],
-            backup_keep_count=keep,
-        )
+        update_settings(backup_keep_count=keep)
         return jsonify({'success': True, 'backup_keep_count': keep})
     except (ValueError, TypeError):
         return jsonify({'error': 'Invalid keep count'}), 400
@@ -4724,15 +5242,7 @@ def api_save_self_route():
     else:
         _delete_self_route()
         sr = {'domain': '', 'service_url': ''}
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'],
-        visible_tabs=settings['visible_tabs'],
-        self_route=sr,
-    )
+    update_settings(self_route=sr)
     return jsonify({'ok': True})
 
 
@@ -4772,6 +5282,9 @@ def _clean_duration(value):
     return v if re.match(r'^(\d+(ms|s|m|h))+$', v) else ''
 
 
+_SCHEME_IN_HOST = re.compile(r'^(https?|h2c)://', re.I)
+
+
 def _backend_servers(rows, key, scheme_default='http'):
     servers = []
     for row in rows if isinstance(rows, list) else []:
@@ -4782,7 +5295,7 @@ def _backend_servers(rows, key, scheme_default='http'):
             continue
         port = str(row.get('port') or '').strip()
         if key == 'url':
-            if host.startswith('http://') or host.startswith('https://'):
+            if _SCHEME_IN_HOST.match(host):
                 servers.append({'url': host})
             else:
                 scheme = str(row.get('scheme') or scheme_default).strip() or scheme_default
@@ -4930,15 +5443,7 @@ def _disabled_key(disabled, full_id, plain_id, prefix=''):
 
 
 def _save_disabled_routes(settings, disabled):
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'],
-        visible_tabs=settings['visible_tabs'],
-        disabled_routes=disabled,
-    )
+    _save_edit_dicts(disabled_routes=disabled)
 
 
 def _toggle_route(route_id: str, enable: bool):
@@ -5033,15 +5538,7 @@ def _toggle_route(route_id: str, enable: bool):
         create_backup(target_path)
         save_config(_strip_empty_sections(svc_config), target_path)
 
-    save_settings(
-        domains=settings['domains'],
-        cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'],
-        auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'],
-        visible_tabs=settings['visible_tabs'],
-        disabled_routes=disabled,
-    )
+    _save_edit_dicts(disabled_routes=disabled)
 
 
 def _self_route_service_name() -> str:
@@ -5066,7 +5563,6 @@ def _collect_file_services(configs):
 @login_required
 def api_routes():
     apps, middlewares = _build_all_apps(include_external=False)
-    apps = [a for a in apps if not (a.get('service_name') or '').endswith('@internal')]
     return jsonify({'apps': apps, 'middlewares': middlewares,
                     'configErrors': _get_config_parse_errors(),
                     'services': _collect_file_services(load_config(_p) for _p in env.CONFIG_PATHS)})
@@ -5083,6 +5579,7 @@ def api_routes_all():
 @app.route('/api/configs')
 @login_required
 def api_configs():
+    env.refresh_config_paths()
     return jsonify({
         'files': [{'label': os.path.basename(p), 'path': p} for p in env.CONFIG_PATHS],
         'configDirSet': bool(ACTIVE_CONFIG_DIR),
@@ -5132,22 +5629,32 @@ def _sanitize_route_overrides(overrides):
 
 
 def _write_groups_config(data, server=''):
-    doc = _read_groups_file()
-    scope = {
-        'custom_groups':   list(data.get('custom_groups', []) or []),
-        'route_overrides': _sanitize_route_overrides(data.get('route_overrides', {})),
-    }
-    key = _groups_scope_key(server)
-    if key:
-        servers = dict(doc.get('servers') or {})
-        servers[key] = scope
-        doc['servers'] = servers
-    else:
-        doc['custom_groups'] = scope['custom_groups']
-        doc['route_overrides'] = scope['route_overrides']
-    _y = SafeYAML(typ='safe')
-    with open(GROUPS_CONFIG_FILE, 'w') as f:
-        _y.dump(doc, f)
+    with _locks.file_lock(GROUPS_CONFIG_FILE):
+        doc = _read_groups_file()
+        scope = {
+            'custom_groups':   list(data.get('custom_groups', []) or []),
+            'route_overrides': _sanitize_route_overrides(data.get('route_overrides', {})),
+        }
+        key = _groups_scope_key(server)
+        if key:
+            servers = dict(doc.get('servers') or {})
+            servers[key] = scope
+            doc['servers'] = servers
+        else:
+            doc['custom_groups'] = scope['custom_groups']
+            doc['route_overrides'] = scope['route_overrides']
+        _y = SafeYAML(typ='safe')
+        tmp = f"{GROUPS_CONFIG_FILE}.tmp.{os.getpid()}.{threading.get_ident()}"
+        try:
+            with open(tmp, 'w') as f:
+                _y.dump(doc, f)
+            _cfg._replace_or_copy(tmp, GROUPS_CONFIG_FILE)
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
 @app.route('/api/dashboard/config', methods=['GET'])
 @login_required
@@ -5229,17 +5736,13 @@ def _toggle_route_agent(agent: dict, agent_id: str, route_id: str, enable: bool)
             else:
                 continue
             break
-    save_settings(
-        domains=settings['domains'], cert_resolver=settings['cert_resolver'],
-        traefik_api_url=settings['traefik_api_url'], auth_enabled=settings['auth_enabled'],
-        password_hash=settings['password_hash'], visible_tabs=settings['visible_tabs'],
-        disabled_routes=disabled,
-    )
+    _save_edit_dicts(disabled_routes=disabled)
 
 
 @app.route('/api/routes/<path:route_id>/toggle', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_toggle_route(route_id):
     body     = request.get_json(force=True, silent=True) or {}
     enable   = body.get('enable', True)
@@ -5294,6 +5797,7 @@ def api_route_raw_get(route_id):
 @app.route('/api/routes/<path:route_id>/raw', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def api_route_raw_save(route_id):
     body    = request.get_json(force=True, silent=True) or {}
     content = body.get('content', '')
@@ -5405,7 +5909,6 @@ def _static_cert_resolvers():
 def index():
     settings    = load_settings()
     apps, middlewares = _build_all_apps(include_external=False)
-    apps = [a for a in apps if not (a.get('service_name') or '').endswith('@internal')]
     auth_on    = _auth_required()
     _ack       = bool(load_settings().get('auth_external_ack'))
     no_auth    = not _auth_required() and not _ack
@@ -5434,6 +5937,7 @@ def _is_fetch():
 @app.route('/save', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def save_entry():
     fetch = _is_fetch()
     try:
@@ -5912,15 +6416,7 @@ def save_entry():
                                managed_backends=_udp_managed)
 
         if _ledger_changed:
-            save_settings(
-                domains=settings['domains'],
-                cert_resolver=settings['cert_resolver'],
-                traefik_api_url=settings['traefik_api_url'],
-                auth_enabled=settings['auth_enabled'],
-                password_hash=settings['password_hash'],
-                visible_tabs=settings['visible_tabs'],
-                managed_middlewares=_ledger,
-            )
+            _save_edit_dicts(managed_middlewares=_ledger)
         _was_disabled = False
         if is_edit and original_id:
             _disabled_now = load_settings().get('disabled_routes', {})
@@ -6008,6 +6504,7 @@ def _drop_owned_transport(config, svc_name, ledger, agent_id=''):
 @app.route('/delete/<router_id>', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def delete_entry(router_id):
     fetch = _is_fetch()
     try:
@@ -6070,13 +6567,7 @@ def delete_entry(router_id):
         else:
             threading.Thread(target=lambda: _git_push_if_enabled('route delete'), daemon=True).start()
         if _del_ledger_changed:
-            _s = load_settings()
-            save_settings(
-                domains=_s['domains'], cert_resolver=_s['cert_resolver'],
-                traefik_api_url=_s['traefik_api_url'], auth_enabled=_s['auth_enabled'],
-                password_hash=_s['password_hash'], visible_tabs=_s['visible_tabs'],
-                managed_middlewares=_del_ledger,
-            )
+            _save_edit_dicts(managed_middlewares=_del_ledger)
         msg = f"Route {plain_id} deleted"
         add_notification('warning', msg)
         if fetch:
@@ -6093,6 +6584,7 @@ def delete_entry(router_id):
 @app.route('/save-middleware', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def save_middleware():
     fetch = _is_fetch()
     try:
@@ -6377,6 +6869,7 @@ def _retarget_middleware(config, old: str, new: str) -> bool:
 @app.route('/delete-middleware/<mw_name>', methods=['POST'])
 @csrf_protect
 @login_required
+@_config_edit
 def delete_middleware(mw_name):
     fetch = _is_fetch()
     try:
@@ -6668,16 +7161,9 @@ def oidc_callback():
         logger.warning(f"OIDC login denied for {email!r} - no matching group")
         flash("Your account is not authorized to access this application.", "error")
         return redirect(url_for('login'))
-    session.clear()
-    session.update({
-        'authenticated': True,
-        'last_active':   time.time(),
-        'login_time':    datetime.now(timezone.utc).isoformat(),
-        'oidc_email':    email,
-        'oidc_name':     name,
-    })
+    _start_session(False, {'oidc_email': email, 'oidc_name': name, 'auth_method': 'oidc'},
+                   note=f"OIDC login: {email} from {request.remote_addr}")
     logger.info(f"OIDC login success for {email!r} from {request.remote_addr}")
-    add_notification('info', f"OIDC login: {email} from {request.remote_addr}", category='security')
     return redirect(url_for('index'))
 
 
@@ -6831,6 +7317,9 @@ def _agent_routes_payload(agent, agent_id):
         s_resp = _agent_request(agent, 'GET', '/api/traefik/services')
         all_routers  = r_resp.json()  if r_resp.ok  else {}
         all_services = s_resp.json()  if s_resp.ok  else {}
+        if r_resp.ok and all_routers.get('complete') is False:
+            config_errors.append({'file': "Agent Traefik API",
+                                  'error': all_routers.get('tcp_error') or all_routers.get('udp_error') or 'router list incomplete'})
         if not r_resp.ok:
             try:
                 err = r_resp.json().get('error') or r_resp.text
@@ -7003,6 +7492,7 @@ def api_agents_list():
 @app.route('/api/agents', methods=['POST'])
 @csrf_protect
 @login_required
+@_agents_locked
 def api_agents_create():
     import uuid as _uuid
     data = request.get_json(silent=True) or {}
@@ -7071,6 +7561,7 @@ def _agent_url_error(url: str) -> str:
 @app.route('/api/agents/<agent_id>', methods=['PUT'])
 @csrf_protect
 @login_required
+@_agents_locked
 def api_agents_update(agent_id):
     data    = request.get_json(silent=True) or {}
     agents  = load_agents()
@@ -7159,27 +7650,29 @@ def _remove_agent_git_clone(agent_id: str) -> bool:
 
 
 def _forget_agent_settings(agent_id: str) -> bool:
-    prefix = f"agent_{agent_id}::"
-    s = load_settings()
-    disabled = {k: v for k, v in (s.get('disabled_routes') or {}).items()
-                if not str(k).startswith(prefix)}
-    ledger   = {k: v for k, v in (s.get('managed_middlewares') or {}).items()
-                if not str(k).startswith(prefix)}
-    if (len(disabled) == len(s.get('disabled_routes') or {})
-            and len(ledger) == len(s.get('managed_middlewares') or {})):
-        return False
-    save_settings(
-        domains=s['domains'], cert_resolver=s['cert_resolver'],
-        traefik_api_url=s['traefik_api_url'], auth_enabled=s['auth_enabled'],
-        password_hash=s['password_hash'], visible_tabs=s['visible_tabs'],
-        disabled_routes=disabled, managed_middlewares=ledger,
-    )
-    return True
+    prefix  = f"agent_{agent_id}::"
+    changed = []
+
+    def forget(s):
+        disabled = {k: v for k, v in (s.get('disabled_routes') or {}).items()
+                    if not str(k).startswith(prefix)}
+        ledger   = {k: v for k, v in (s.get('managed_middlewares') or {}).items()
+                    if not str(k).startswith(prefix)}
+        if (len(disabled) == len(s.get('disabled_routes') or {})
+                and len(ledger) == len(s.get('managed_middlewares') or {})):
+            return None
+        changed.append(True)
+        return {'disabled_routes': disabled, 'managed_middlewares': ledger}
+
+    with _locks.config_edit_lock(f'config:agent:{agent_id}'):
+        _settings.modify_settings(forget)
+    return bool(changed)
 
 
 @app.route('/api/agents/<agent_id>', methods=['DELETE'])
 @csrf_protect
 @login_required
+@_agents_locked
 def api_agents_delete(agent_id):
     before = load_agents()
     agents = [a for a in before if a.get('id') != agent_id]
@@ -7194,6 +7687,7 @@ def api_agents_delete(agent_id):
 @app.route('/api/agents/<agent_id>/rotate-key', methods=['POST'])
 @csrf_protect
 @login_required
+@_agents_locked
 def api_agents_rotate_key(agent_id):
     try:
         agents = load_agents()

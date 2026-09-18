@@ -147,7 +147,7 @@ Optional tabs - each requires a file mounted into the container.
 
 | Tab | Mount required | Description |
 |-----|----------------|-------------|
-| [Certificates](tab-certs.md) | `acme.json:/app/acme.json:ro` | TLS certificates with expiry tracking. `ACME_JSON_PATH` accepts several files or a directory, for setups with one resolver per storage file |
+| [Certificates](tab-certs.md) | `acme.json:/app/acme.json:ro` | TLS certificates with expiry tracking, and which of them nothing uses any more. `ACME_JSON_PATH` accepts several files or a directory, for setups with one resolver per storage file. Mount it read-write and set a restart method to also [remove](tab-certs.md#removing-a-certificate) certificates |
 | [Plugins](tab-plugins.md) | `traefik.yml:/app/traefik.yml` plus `STATIC_CONFIG_PATH=/app/traefik.yml` (no default) | Plugins from your static config with the middlewares using each one, plus a guided install. Versions are checked against the catalog daily and flagged when one is out of date. Add `:ro` to keep the tab read-only |
 | [Logs](tab-logs.md) | `access.log:/app/logs/access.log:ro` | Access log analytics: status, latency, paths, clients and services as clickable cards over a live tail, with optional auto refresh and a [world map](geoip.md) |
 
@@ -185,6 +185,8 @@ Read-only tabs that pull live data from the Traefik API - no extra mounts, just 
 | [File (external)](tab-file_external.md) | `file` |
 
 > Traefik Manager's own routes are automatically excluded from the File provider tab.
+
+Provider tabs switch themselves on the first time Traefik reports routers from that provider, on the Host and on each agent separately. The setup wizard pre-selects the providers Traefik is already running. A tab you turn off stays off.
 
 ---
 
@@ -363,7 +365,7 @@ Browse routes, middlewares, and services. Enable/disable routes. Add and edit wi
 | Agent | Go 1.25 · Alpine Linux (TMA - remote agent daemon) |
 | Config | ruamel.yaml (preserves comments and Go templates) |
 | Auth | bcrypt · pyotp (TOTP) · Flask sessions · CSRF · Flask-Limiter · Fernet |
-| Frontend | Vanilla JS · Tailwind CSS 3.4 · Phosphor Icons |
+| Frontend | Vanilla JS · Tailwind CSS 3.4 · Phosphor Icons · Twemoji country flags (CC-BY 4.0) |
 | Editor | Monaco Editor 0.52 (VS Code engine) |
 | Route Map | dagre 3.1 (graph layout) |
 | Geolocation | maxminddb · DB-IP Lite (local lookups, no external calls) |

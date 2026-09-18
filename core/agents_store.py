@@ -1,7 +1,7 @@
 import os
 import threading
 
-from core import config, crypto, env
+from core import config, crypto, env, locks
 from core.env import logger
 
 
@@ -64,13 +64,22 @@ def parse_agent_dict(a: dict) -> dict:
         'tma_rate_limit':               str(a.get('tma_rate_limit', '')).strip(),
         'domains':                      [str(d).strip() for d in (a.get('domains') or []) if str(d).strip()],
         'visible_tabs':                 {str(k): bool(v) for k, v in a['visible_tabs'].items()} if isinstance(a.get('visible_tabs'), dict) else {},
+        'provider_tabs_seen':           [str(t) for t in (a.get('provider_tabs_seen') or []) if str(t)],
     }
 
-def load_agents() -> list:
-    if os.path.exists(env.AGENTS_PATH):
+def load_agents(fresh: bool = False) -> list:
+    blob, digest = config.read_for_cache(env.AGENTS_PATH)
+    if not fresh:
+        hit = config.cached_parse('agents', digest)
+        if hit is not None:
+            return hit
+    return config.store_parse('agents', digest, _load_agents(blob))
+
+
+def _load_agents(blob) -> list:
+    if blob is not None:
         try:
-            with open(env.AGENTS_PATH, 'r') as f:
-                raw = config.yaml_safe.load(f) or {}
+            raw = config.yaml_safe.load(blob.decode('utf-8')) or {}
             return [
                 parse_agent_dict(a)
                 for a in (raw.get('agents', []) or [])
@@ -99,6 +108,15 @@ def load_agents() -> list:
             logger.warning(f"Agent migration from manager.yml failed: {e}")
 
     return []
+
+def modify_agents(fn):
+    with locks.file_lock(env.AGENTS_PATH):
+        agents = load_agents()
+        result = fn(agents)
+        if result is not False:
+            save_agents_file(agents)
+        return result
+
 
 def save_agents_file(agents: list):
     os.makedirs(os.path.dirname(env.AGENTS_PATH), exist_ok=True)

@@ -5,6 +5,7 @@ from functools import wraps
 
 from flask import abort, redirect, request, session, url_for
 
+from core import rate_store as rate_store_mod
 from core import settings as settings_mod
 from core.env import logger
 
@@ -74,8 +75,28 @@ def _is_authenticated() -> bool:
         return True
     return session.get('authenticated') is True
 
+def _session_epoch() -> int:
+    try:
+        return int(settings_mod.load_settings().get('session_epoch') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+def _stamp_session():
+    session['epoch'] = _session_epoch()
+
+def _drop_stale_session() -> bool:
+    if not session.get('authenticated'):
+        return False
+    if int(session.get('epoch') or 0) == _session_epoch():
+        return False
+    logger.info(f"Signed out a session issued before the last password change, for {request.remote_addr}")
+    session.clear()
+    return True
+
 def _check_inactivity():
     if not session.get('authenticated'):
+        return
+    if _drop_stale_session():
         return
     last = session.get('last_active')
     now  = time.time()
@@ -85,6 +106,44 @@ def _check_inactivity():
         session.clear()
         return
     session['last_active'] = now
+
+OTP_MAX_ATTEMPTS = 5
+OTP_PENDING_SECONDS = 600
+_OTP_PREFIX = 'otp-attempts/'
+_otp_store = rate_store_mod.SharedStorage()
+
+
+def _otp_key(nonce) -> str:
+    return _OTP_PREFIX + str(nonce or '')
+
+
+def start_otp_attempt():
+    session['otp_nonce'] = secrets.token_urlsafe(18)
+    session['otp_started'] = int(time.time())
+
+
+def otp_attempt_expired() -> bool:
+    started = session.get('otp_started')
+    if not session.get('otp_nonce') or not isinstance(started, int):
+        return True
+    if time.time() - started > OTP_PENDING_SECONDS:
+        return True
+    return _otp_store.get(_otp_key(session['otp_nonce'])) >= OTP_MAX_ATTEMPTS
+
+
+def record_otp_failure() -> int:
+    return _otp_store.incr(_otp_key(session.get('otp_nonce')), OTP_PENDING_SECONDS)
+
+
+def forget_otp_attempt():
+    nonce = session.get('otp_nonce')
+    if nonce:
+        _otp_store.clear(_otp_key(nonce))
+
+
+def reset_otp_attempts():
+    _otp_store.clear_prefix(_OTP_PREFIX)
+
 
 def _check_api_key() -> bool:
     key = request.headers.get('X-Api-Key', '')

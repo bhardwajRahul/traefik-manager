@@ -434,11 +434,13 @@ function _dashLaunchInfo(r, ov) {
     if (!rule) return { url: null, why: 'no rule, nothing to open. <b>Set a link in edit</b>', glyph: 'ph-bold ph-link-break' };
     let picked = null, hosts = 0, wild = false;
     _dskRuleBranches(rule).forEach(b => {
-        const m = b.match(/Host\(`([^`]+)`\)/);
-        if (!m) return;
-        if (m[1].indexOf('*') >= 0) { wild = true; return; }
+        const hostRe = /(!?)\s*Host\(`([^`]+)`\)/g;
+        let m, host = null;
+        while ((m = hostRe.exec(b))) { if (m[1] !== '!') { host = m[2]; break; } }
+        if (!host) return;
+        if (host.indexOf('*') >= 0) { wild = true; return; }
         hosts++;
-        if (!picked) picked = { host: m[1], path: (b.match(/PathPrefix\(`([^`]+)`\)/) || [])[1] || '' };
+        if (!picked) picked = { host: host, path: (b.match(/PathPrefix\(`([^`]+)`\)/) || [])[1] || '' };
     });
     if (!picked) {
         const why = wild
@@ -785,6 +787,8 @@ function _dskAgo(at) {
     return 'checked ' + Math.floor(sec / 3600) + 'h ago';
 }
 
+const DSK_HIT_MS = 2400;
+
 function _dskTogglePod(name, force) {
     const entry = _dskPods.get(name);
     const grid  = document.getElementById('dashPodsGrid');
@@ -799,6 +803,9 @@ function _dskTogglePod(name, force) {
     if (force === true) {
         const bad = fresh.querySelector('[data-health="down"]') || fresh.querySelector('[data-health="warn"]');
         if (bad) {
+            const hits = fresh.querySelectorAll('.dsk-row[data-health="down"], .dsk-row[data-health="warn"], .dsk-tile[data-health="down"], .dsk-tile[data-health="warn"]');
+            hits.forEach(el => el.classList.add('dsk-hit'));
+            setTimeout(() => hits.forEach(el => el.classList.remove('dsk-hit')), DSK_HIT_MS);
             bad.scrollIntoView({ block: 'nearest' });
             bad.focus({ preventScroll: true });
             return;
@@ -981,6 +988,12 @@ window.refreshDashboardTab = async function() {
     const empty   = document.getElementById('dashEmpty');
     const deg     = document.getElementById('dashDegraded');
     _dskBind();
+
+    if (!_dashDrawn && window.rmHydrate()) {
+        _dashDrawn = true;
+        dashRenderProviderFilters();
+        dashRender();
+    }
 
     if (!_dashDrawn) {
         if (loading) loading.classList.remove('hidden');

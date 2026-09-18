@@ -86,7 +86,7 @@ The **History** section shows the last 50 commits. For each commit you can:
 - **View diff** - see exactly which lines changed
 - **Restore** - roll back to that commit's config
 
-Restoring creates a local backup of the current config first (visible under Settings - Backups on the Dynamic Config and Static Config tabs), then writes the files from the selected commit.
+Restoring creates a local backup of the current config first (visible under Settings - Backups on the Dynamic Config and Static Config tabs), then writes every dynamic config file and the static config stored in the selected commit. Files added since that commit are kept.
 
 **Reset local repository** (under Behaviour) deletes the local clone only. The remote repository and its commits are untouched, and the clone is recreated on the next push.
 
@@ -112,8 +112,10 @@ Custom examples:
 
 Traefik Manager backs up:
 
-- All dynamic config files (`CONFIG_PATH`, `CONFIG_PATHS`, or `CONFIG_DIR`) - copied into `dynamic/`
+- All dynamic config files (`CONFIG_PATH`, `CONFIG_PATHS`, or `CONFIG_DIR`) - copied into `dynamic/`. Files that share a name keep their subfolder, for example `dynamic/one/routes.yml` and `dynamic/two/routes.yml`
 - The static config, if configured (`static_config_path` in `manager.yml`, or `STATIC_CONFIG_PATH`) - copied into `static/`
+
+Traefik Manager's own files are never pushed and are never read as Traefik config, even when `CONFIG_DIR` points at the folder that holds them: `manager.yml`, `agents.yml`, `notifications.yml`, `dashboard.yml`, `templates.yml`, the backup directory and the git clone inside it.
 
 The repository is organised into subfolders:
 
@@ -169,4 +171,6 @@ The clone paths are the same, relative to your `BACKUP_DIR` (default `/app/backu
 - The access token is stored encrypted in `manager.yml` using the same Fernet encryption used for other secrets (OIDC client secret, CrowdSec API key).
 - The token is never returned by the API - only a `git_backup_token_set: true/false` flag is exposed. It is also redacted from any git error message shown in the UI.
 - Use a token with the minimum required scope (repository write only). Do not use a full admin token.
+- Only dynamic config files (`.yml`, `.yaml`, `.toml`) and the static config are committed. Certificate stores never are.
+- Only the token configured here is used. Any git credential helper on the machine is ignored, so a token it holds is never sent to the backup remote and this token is never saved into it.
 - Use a **private** repository to keep your Traefik config off the public internet.

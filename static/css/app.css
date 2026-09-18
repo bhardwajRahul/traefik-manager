@@ -1,4 +1,12 @@
 
+@font-face {
+    font-family: 'Twemoji Country Flags';
+    src: url('../vendor/fonts/TwemojiCountryFlags.woff2') format('woff2');
+    unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F;
+    font-display: swap;
+}
+.tm-flag { font-family: 'Twemoji Country Flags', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif; font-style: normal; }
+
 :root {
     color-scheme: dark;
     --bg: #0d1117;
@@ -371,6 +379,16 @@ html.tm-compact-stats .sig-root .sig-ep-n { font-size: 12px; }
     .sig-root .sig-card .lg-pct { display: block; }
 }
 @container sigstats (min-width: 560px) { .sig-root .sig-grid > .lg-wide { grid-column: span 2; } }
+@container sigstats (min-width: 1080px) {
+    .sig-root #csGrid > .lg-wide { grid-column: span 1; }
+    .sig-root #csGrid > [data-card="scenarios"].lg-wide { grid-column: span 2; }
+}
+@container sigstats (min-width: 560px) {
+    html.tm-compact-stats .sig-root #csGrid > .lg-wide,
+    .sig-root .sig-compact #csGrid > .lg-wide { grid-column: span 1; }
+    html.tm-compact-stats .sig-root #csGrid > [data-card="scenarios"].lg-wide,
+    .sig-root .sig-compact #csGrid > [data-card="scenarios"].lg-wide { grid-column: span 2; }
+}
 
 .sig-root .sig-compact .sig-grid > .lg-wide,
 html.tm-compact-stats .sig-root .sig-grid > .lg-wide { grid-column: span 2; }
@@ -443,8 +461,6 @@ html.tm-compact-stats .sig-root .atk-feed .sig-ep-kind { padding-left: 0; }
     .sig-root .atk-decs .sig-ep-n { text-align: left; }
 }
 
-.sig-root .sig-compact .atk-feed .atk-open,
-html.tm-compact-stats .sig-root .atk-feed .atk-open { display: none; }
 .sig-root .sig-compact .atk-page,
 html.tm-compact-stats .sig-root .atk-page { font-size: 10px; padding-top: 6px; }
 
@@ -526,6 +542,37 @@ select.input-field:disabled { opacity: 0.6; cursor: not-allowed; }
 }
 .btn-primary:hover { background: color-mix(in srgb, var(--blue) 22%, transparent); border-color: color-mix(in srgb, var(--blue) 45%, transparent); }
 .btn-primary:active { transform: scale(0.97); }
+.btn-primary.btn-red {
+    background: color-mix(in srgb, var(--red) 14%, transparent);
+    color: var(--red);
+    border-color: color-mix(in srgb, var(--red) 30%, transparent);
+}
+.btn-primary.btn-red:hover { background: color-mix(in srgb, var(--red) 22%, transparent); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+
+.confirm-opt {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--input-bg);
+    cursor: pointer;
+    margin: 0;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.55;
+    color: var(--text);
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.confirm-opt:hover { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+
+.confirm-opt:has(input:checked) {
+    background: color-mix(in srgb, var(--red) 7%, transparent);
+    border-color: color-mix(in srgb, var(--red) 30%, transparent);
+}
 
 .btn-secondary {
     background: var(--btn-secondary-bg);
@@ -830,6 +877,7 @@ label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); 
 
 .sig-root .dsk-row { position: relative; display: grid; align-items: center; grid-template-columns: 34px minmax(0, 1fr) 56px; grid-template-areas: "ic id rail" "ic note rail"; column-gap: 9px; row-gap: 2px; min-width: 0; padding: 5px 2px 5px 4px; border-radius: 6px; border-top: 1px solid var(--border); color: inherit; transition: background .12s, box-shadow .12s, opacity .12s; }
 .sig-root .dsk-row:first-child { border-top: none; }
+.sig-root .dsk-row.dsk-hit, .sig-root .dsk-tile.dsk-hit { animation: pulse .8s ease-in-out 3; }
 .sig-root .dsk-row:hover, .sig-root .dsk-row:focus-within { background: color-mix(in srgb, var(--blue) 6%, transparent); box-shadow: inset 2px 0 0 var(--blue); }
 .sig-root .dsk-row[data-health="warn"] { box-shadow: inset 2px 0 0 var(--yellow); }
 .sig-root .dsk-row[data-health="warn"]:hover, .sig-root .dsk-row[data-health="warn"]:focus-within { background: color-mix(in srgb, var(--yellow) 7%, transparent); box-shadow: inset 2px 0 0 var(--yellow); }

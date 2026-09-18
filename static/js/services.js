@@ -107,15 +107,17 @@ function filterServices(f) {
 
 function renderServicesTable() {
     const search = (document.getElementById('svcSearch')?.value || '').toLowerCase();
-    const anyDownOf = s => {
+    const downOf = s => {
         const m = s.serverStatus;
-        if (!m || typeof m !== 'object') return false;
-        return Object.keys(m).some(k => String(m[k]).toUpperCase() !== 'UP');
+        if (!m || typeof m !== 'object') return 0;
+        const keys = Object.keys(m);
+        const down = keys.filter(k => String(m[k]).toUpperCase() !== 'UP').length;
+        return !down ? 0 : down === keys.length ? 2 : 1;
     };
     const statusOf = s => {
         const st = (s.status || '').toLowerCase();
         if (st === 'disabled' || st === 'error') return 'error';
-        if (st === 'enabled') return anyDownOf(s) ? 'warning' : 'success';
+        if (st === 'enabled') return ['success', 'warning', 'error'][downOf(s)];
         return 'warning';
     };
     const providerOf = s => {
@@ -133,14 +135,14 @@ function renderServicesTable() {
     if (protoMenu) {
         protoMenu.innerHTML = ['all', ...uniqueProtos].map(p => {
             const label = p === 'all' ? 'All Protocols' : p;
-            return `<button class="live-dd-item${_protoLiveFilter === p ? ' active' : ''}" onclick="pickLiveProto('${p}','${label}')">${label}</button>`;
+            return `<button class="live-dd-item${_protoLiveFilter === p ? ' active' : ''}" onclick="pickLiveProto(${_jsArg(p)},${_jsArg(label)})">${_esc(label)}</button>`;
         }).join('');
     }
     const provMenu = document.getElementById('dd-provider-menu');
     if (provMenu) {
         provMenu.innerHTML = ['all', ...uniqueProviders].map(v => {
             const label = v === 'all' ? 'All Providers' : v;
-            return `<button class="live-dd-item${_providerFilter === v ? ' active' : ''}" onclick="pickLiveProvider('${v}','${label}')">${label}</button>`;
+            return `<button class="live-dd-item${_providerFilter === v ? ' active' : ''}" onclick="pickLiveProvider(${_jsArg(v)},${_jsArg(label)})">${_esc(label)}</button>`;
         }).join('');
     }
 
@@ -574,15 +576,27 @@ function addSvcHcHeader(data) {
     wrap.appendChild(row);
 }
 
+function _svcDurationShort(v) {
+    const s = String(v === undefined || v === null ? '' : v).trim();
+    const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?(?:(\d+)ms)?$/.exec(s);
+    if (!m || !s) return s;
+    const parts = [];
+    if (m[1] && Number(m[1])) parts.push(m[1] + 'h');
+    if (m[2] && Number(m[2])) parts.push(m[2] + 'm');
+    if (m[3] && Number(m[3])) parts.push(m[3] + 's');
+    if (m[4] && Number(m[4])) parts.push(m[4] + 'ms');
+    return parts.length ? parts.join('') : s;
+}
+
 function _svcHcFill(hc) {
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = (v === undefined || v === null) ? '' : String(v); };
-    const on = !!(hc && hc.path);
+    const on = !!(hc && typeof hc === 'object' && Object.keys(hc).length);
     const en = document.getElementById('svcHcEnabled');
     if (en) en.checked = on;
     set('svcHcPath', hc && hc.path);
-    set('svcHcInterval', hc && hc.interval);
-    set('svcHcTimeout', hc && hc.timeout);
-    set('svcHcUnhealthy', hc && hc.unhealthyInterval);
+    set('svcHcInterval', _svcDurationShort(hc && hc.interval));
+    set('svcHcTimeout', _svcDurationShort(hc && hc.timeout));
+    set('svcHcUnhealthy', _svcDurationShort(hc && hc.unhealthyInterval));
     set('svcHcMethod', hc && hc.method);
     set('svcHcStatus', hc && hc.status);
     set('svcHcScheme', (hc && hc.scheme) || '');
@@ -665,7 +679,7 @@ async function addServiceRow(data) {
     row.id = id;
     row.innerHTML =
         `<select class="input-field svc-kind text-sm" onchange="_svcRowKindChanged(this)"><option value="manual">IP : Port</option><option value="service">Service</option></select>`
-        + `<select class="input-field svc-scheme text-sm"><option value="http">HTTP</option><option value="https">HTTPS</option></select>`
+        + `<select class="input-field svc-scheme text-sm"><option value="http">HTTP</option><option value="https">HTTPS</option><option value="h2c">h2c</option></select>`
         + `<input type="text" class="input-field svc-addr text-sm" placeholder="10.0.0.10:80">`
         + `<select class="input-field svc-ref text-sm" style="display:none"></select>`
         + `<input type="number" class="input-field svc-weight text-sm" value="1" min="0" title="Weight">`
@@ -748,36 +762,41 @@ async function openServiceModal(existing) {
     if (del) del.style.display = existing ? '' : 'none';
     const rows = document.getElementById('svcRows');
     if (rows) rows.innerHTML = '';
-    await _populateConfigFileSelect('service');
-    if (existing && !_compositeTypeOf(existing)) {
-        const urls = ((existing.loadBalancer || {}).servers || [])
-            .map(sv => sv.url || sv.address).filter(Boolean);
-        if (urls.length) {
-            for (const u of urls) await addServiceRow(_svcUrlToRow(u));
-        } else {
-            await addServiceRow();
-        }
-    } else if (existing) {
-        for (const c of _compositeChildren(existing).map(_svcChildToRow)) await addServiceRow(c);
-    } else {
-        await addServiceRow();
-    }
-    _svcHcFill(existing && !_compositeTypeOf(existing) ? (existing.loadBalancer || {}).healthCheck : null);
-    _svcTypeChanged();
     document.getElementById('serviceModal')?.classList.add('open');
     document.getElementById('svcBackdrop')?.classList.add('open');
     if (!setDetailDockOpen(true)) document.body.style.overflow = 'hidden';
+    const fillRows = async () => {
+        if (existing && !_compositeTypeOf(existing)) {
+            const urls = ((existing.loadBalancer || {}).servers || [])
+                .map(sv => sv.url || sv.address).filter(Boolean);
+            if (urls.length) {
+                for (const u of urls) await addServiceRow(_svcUrlToRow(u));
+            } else {
+                await addServiceRow();
+            }
+        } else if (existing) {
+            for (const c of _compositeChildren(existing).map(_svcChildToRow)) await addServiceRow(c);
+        } else {
+            await addServiceRow();
+        }
+    };
+    await Promise.all([_populateConfigFileSelect('service'), fillRows()]);
+    _svcHcFill(existing && !_compositeTypeOf(existing) ? (existing.loadBalancer || {}).healthCheck : null);
+    _svcTypeChanged();
 }
 
 function _compositeTypeOf(s) {
     return s.weighted ? 'weighted' : s.mirroring ? 'mirroring' : s.failover ? 'failover' : '';
 }
 
+const _SVC_SCHEME_RE = /^(https?|h2c):\/\//i;
+
 function _svcUrlToRow(url) {
     const u = String(url || '');
+    const m = u.match(_SVC_SCHEME_RE);
     return { kind: 'manual',
-             scheme: u.startsWith('https://') ? 'https' : 'http',
-             address: u.replace(/^https?:\/\//, '') };
+             scheme: m ? m[1].toLowerCase() : 'http',
+             address: u.replace(_SVC_SCHEME_RE, '') };
 }
 
 function _svcChildToRow(label) {

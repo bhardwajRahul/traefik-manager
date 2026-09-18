@@ -1,10 +1,74 @@
+import functools
 import os
 import threading
 
-from core import agents_store, config, crypto, env
+from core import agents_store, config, crypto, env, locks
 from core.env import logger
 
-OPTIONAL_TABS = ['dashboard', 'routemap', 'docker', 'kubernetes', 'swarm', 'nomad', 'ecs', 'consulcatalog', 'redis', 'etcd', 'consul', 'zookeeper', 'http_provider', 'file_external', 'certs', 'tls', 'crowdsec', 'plugins', 'logs', 'static']
+
+def serialized(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with locks.file_lock(env.SETTINGS_PATH):
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+CARRIED = ('domains', 'cert_resolver', 'traefik_api_url', 'auth_enabled', 'password_hash', 'visible_tabs')
+
+
+@serialized
+def save_settings(*args, **kwargs):
+    return _write_settings(*args, **kwargs)
+
+
+@serialized
+def update_settings(**changes):
+    current = load_settings()
+    fields  = {k: current.get(k) for k in CARRIED}
+    fields.update(changes)
+    return _write_settings(**fields)
+
+
+@serialized
+def bump_session_epoch(**changes):
+    current = load_settings()
+    fields  = {k: current.get(k) for k in CARRIED}
+    fields.update(changes)
+    fields['session_epoch'] = int(current.get('session_epoch') or 0) + 1
+    _write_settings(**fields)
+    return fields['session_epoch']
+
+
+@serialized
+def modify_settings(fn):
+    current = load_settings()
+    changes = fn(current)
+    if not changes:
+        return None
+    fields = {k: current.get(k) for k in CARRIED}
+    fields.update(changes)
+    return _write_settings(**fields)
+
+
+@serialized
+def merge_settings_dicts(before: dict, **after):
+    current = load_settings()
+    fields  = {k: current.get(k) for k in CARRIED}
+    for key, new in after.items():
+        old    = before.get(key) or {}
+        new    = new or {}
+        merged = dict(current.get(key) or {})
+        for k, v in new.items():
+            if k not in old or old[k] != v:
+                merged[k] = v
+        for k in old:
+            if k not in new:
+                merged.pop(k, None)
+        fields[key] = merged
+    return _write_settings(**fields)
+
+OPTIONAL_TABS = ['dashboard', 'routemap', 'docker', 'kubernetes', 'swarm', 'nomad', 'ecs', 'consulcatalog', 'redis', 'etcd', 'consul', 'zookeeper', 'http_provider', 'file_external', 'internal', 'certs', 'tls', 'crowdsec', 'plugins', 'logs', 'static']
 
 
 UI_PREF_BOOLS = (
@@ -164,7 +228,18 @@ def _new_channel_id():
     return 'ch_' + _s.token_hex(4)
 
 
-def load_settings() -> dict:
+def load_settings(fresh: bool = False) -> dict:
+    blob, digest = config.read_for_cache(env.SETTINGS_PATH)
+    _, agents_digest = config.read_for_cache(env.AGENTS_PATH)
+    key = None if digest is None else (digest, agents_digest)
+    if not fresh:
+        hit = config.cached_parse('settings', key)
+        if hit is not None:
+            return hit
+    return config.store_parse('settings', key, _load_settings(blob))
+
+
+def _load_settings(blob) -> dict:
     defaults = {
         'domains':              [d.strip() for d in os.environ.get('DOMAINS', 'example.com').split(',') if d.strip()] or ['example.com'],
         'cert_resolver':        os.environ.get('CERT_RESOLVER', 'cloudflare'),
@@ -176,6 +251,8 @@ def load_settings() -> dict:
         'must_change_password': False,
         'setup_password_reset': False,
         'setup_complete':       False,
+        'session_epoch':        0,
+        'admin_password_fp':    '',
         'otp_secret':           '',
         'otp_enabled':          False,
         'disabled_routes':      {},
@@ -202,6 +279,7 @@ def load_settings() -> dict:
         'geoip_db_path':        '',
         'route_check_enabled':  True,
         'route_check_interval': 300,
+        'provider_tabs_seen':   [],
         'notification_channels': [],
         'notifications_read_until': 0,
         'webhook_url':          '',
@@ -230,11 +308,12 @@ def load_settings() -> dict:
         'agent_api_rate_limit':      int(os.environ.get('AGENT_API_RATE_LIMIT', 30)),
         'backup_keep_count':         int(os.environ.get('BACKUP_KEEP_COUNT', 0)),
     }
-    if not os.path.exists(env.SETTINGS_PATH):
+    if blob is None:
+        if os.path.exists(env.SETTINGS_PATH):
+            logger.warning(f"Could not read {env.SETTINGS_PATH}, using defaults")
         return defaults
     try:
-        with open(env.SETTINGS_PATH, 'r') as f:
-            raw = f.read()
+        raw = blob.decode('utf-8')
         try:
             data = config.yaml_safe.load(raw) or {}
         except Exception:
@@ -276,6 +355,13 @@ def load_settings() -> dict:
             merged['setup_password_reset'] = bool(data['setup_password_reset'])
         if 'setup_complete' in data:
             merged['setup_complete'] = bool(data['setup_complete'])
+        if 'session_epoch' in data:
+            try:
+                merged['session_epoch'] = max(0, int(data['session_epoch']))
+            except (TypeError, ValueError):
+                merged['session_epoch'] = 0
+        if 'admin_password_fp' in data:
+            merged['admin_password_fp'] = str(data['admin_password_fp'] or '').strip()
         if 'otp_secret' in data:
             merged['otp_secret'] = crypto.decrypt_secret(str(data['otp_secret']).strip())
         if 'otp_enabled' in data:
@@ -351,6 +437,8 @@ def load_settings() -> dict:
             merged['geoip_db_path'] = str(data['geoip_db_path']).strip()
         if 'route_check_enabled' in data:
             merged['route_check_enabled'] = bool(data['route_check_enabled'])
+        if 'provider_tabs_seen' in data and isinstance(data['provider_tabs_seen'], list):
+            merged['provider_tabs_seen'] = [str(t) for t in data['provider_tabs_seen'] if str(t) in OPTIONAL_TABS]
         if 'route_check_interval' in data:
             try:
                 merged['route_check_interval'] = int(data['route_check_interval'])
@@ -427,9 +515,10 @@ def load_settings() -> dict:
         logger.warning(f"Could not load manager.yml, using defaults: {e}")
         return defaults
 
-def save_settings(domains, cert_resolver, traefik_api_url,
+def _write_settings(domains, cert_resolver, traefik_api_url,
                   auth_enabled=True, auth_external_ack=None, password_hash='', visible_tabs=None,
                   must_change_password=None, setup_password_reset=None, setup_complete=None,
+                  session_epoch=None, admin_password_fp=None,
                   otp_secret=None, otp_enabled=None,
                   api_keys=None,
                   disabled_routes=None,
@@ -458,7 +547,8 @@ def save_settings(domains, cert_resolver, traefik_api_url,
                   agent_api_rate_limit=None, backup_keep_count=None,
                   default_theme=None, ui_prefs=None,
                   geoip_enabled=None, geoip_db_path=None,
-                  route_check_enabled=None, route_check_interval=None):
+                  route_check_enabled=None, route_check_interval=None,
+                  provider_tabs_seen=None):
     if visible_tabs is None:
         visible_tabs = {t: False for t in OPTIONAL_TABS}
     _cur = load_settings()
@@ -470,6 +560,10 @@ def save_settings(domains, cert_resolver, traefik_api_url,
         setup_password_reset = _cur.get('setup_password_reset', False)
     if setup_complete is None:
         setup_complete = _cur.get('setup_complete', False)
+    if session_epoch is None:
+        session_epoch = _cur.get('session_epoch', 0)
+    if admin_password_fp is None:
+        admin_password_fp = _cur.get('admin_password_fp', '')
     if otp_secret is None:
         otp_secret = _cur.get('otp_secret', '')
     if otp_enabled is None:
@@ -500,6 +594,8 @@ def save_settings(domains, cert_resolver, traefik_api_url,
         route_check_enabled = _cur.get('route_check_enabled', True)
     if route_check_interval is None:
         route_check_interval = _cur.get('route_check_interval', 300)
+    if provider_tabs_seen is None:
+        provider_tabs_seen = _cur.get('provider_tabs_seen', [])
     if access_log_path is None:
         access_log_path = _cur.get('access_log_path', '')
     if static_config_path is None:
@@ -595,6 +691,8 @@ def save_settings(domains, cert_resolver, traefik_api_url,
         'must_change_password': must_change_password,
         'setup_password_reset': bool(setup_password_reset),
         'setup_complete':       setup_complete,
+        'session_epoch':        int(session_epoch or 0),
+        'admin_password_fp':    str(admin_password_fp or ''),
         'otp_secret':           otp_secret,
         'otp_enabled':          otp_enabled,
         'disabled_routes':      disabled_routes,
@@ -620,6 +718,7 @@ def save_settings(domains, cert_resolver, traefik_api_url,
         'geoip_db_path':        str(geoip_db_path or '').strip(),
         'route_check_enabled':  bool(route_check_enabled),
         'route_check_interval': int(route_check_interval or 300),
+        'provider_tabs_seen':   [str(t) for t in (provider_tabs_seen or []) if str(t) in OPTIONAL_TABS],
         'oidc_groups_claim':    oidc_groups_claim,
         'notification_channels': _dump_channels(notification_channels),
         'notifications_read_until': int(notifications_read_until or 0),
@@ -660,12 +759,46 @@ def save_settings(domains, cert_resolver, traefik_api_url,
     logger.info("Manager settings saved")
 
 
-def _get_acme_json_path() -> str:
-    s = load_settings()
-    path = s.get('acme_json_path', '').strip() or os.environ.get('ACME_JSON_PATH', '/app/acme.json')
-    if path:
-        env.register_read_path(path)
+_PATH_FIELDS = {
+    'acme':   ('acme_json_path', 'ACME_JSON_PATH', '/app/acme.json'),
+    'log':    ('access_log_path', 'ACCESS_LOG_PATH', '/app/logs/access.log'),
+    'static': ('static_config_path', 'STATIC_CONFIG_PATH', ''),
+}
+_refused = {}
+_refused_logged = set()
+
+
+def saved_path_problem(kind: str, value: str) -> str:
+    _field, env_name, _default = _PATH_FIELDS[kind]
+    value = str(value or '').strip()
+    if not value or value == os.environ.get(env_name, '').strip():
+        return ''
+    return config.settings_path_problem(kind, value)
+
+
+def refused_path(kind: str) -> str:
+    return _refused.get(kind, '')
+
+
+def _configured_path(kind: str) -> str:
+    field, env_name, default = _PATH_FIELDS[kind]
+    saved   = str(load_settings().get(field, '') or '').strip()
+    problem = saved_path_problem(kind, saved)
+    if problem:
+        if (kind, saved) not in _refused_logged and len(_refused_logged) < 100:
+            _refused_logged.add((kind, saved))
+            logger.warning(f"Ignoring {field} from manager.yml: {problem}")
+        _refused[kind] = problem
+        env.set_settings_paths(kind, '')
+        return ''
+    _refused.pop(kind, None)
+    path = saved or os.environ.get(env_name, default)
+    env.set_settings_paths(kind, path)
     return path
+
+
+def _get_acme_json_path() -> str:
+    return _configured_path('acme')
 
 
 def get_acme_json_paths() -> list:
@@ -688,19 +821,10 @@ def get_acme_json_paths() -> list:
     return out
 
 def _get_access_log_path() -> str:
-    s = load_settings()
-    path = s.get('access_log_path', '').strip() or os.environ.get('ACCESS_LOG_PATH', '/app/logs/access.log')
-    if path:
-        env.register_read_path(path)
-    return path
+    return _configured_path('log')
 
 def _get_static_config_path() -> str:
-    s = load_settings()
-    path = s.get('static_config_path', '').strip() or os.environ.get('STATIC_CONFIG_PATH', '')
-    if path:
-        env.register_static_path(path)
-        env.register_read_path(path)
-    return path
+    return _configured_path('static')
 
 def _get_restart_method() -> str:
     return os.environ.get('RESTART_METHOD', 'proxy').lower()

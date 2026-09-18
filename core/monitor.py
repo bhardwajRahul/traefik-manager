@@ -4,16 +4,19 @@ import json
 import os
 import threading
 import time
+from urllib.parse import quote
 
 import requests
 
 from core import agents_http as agents_http_mod
+from core import agents_store as agents_store_mod
 from core import certs as certs_mod
 from core import config as cfg_mod
 from core import crowdsec as crowdsec_mod
 from core import env
 from core import geoip as geoip_mod
 from core import notifications
+from core import providers as providers_mod
 from core import settings as settings_mod
 from core import traefik as traefik_mod
 from core.env import logger
@@ -37,6 +40,13 @@ GEOIP_STALE_DAYS  = 35
 AGENT_TIMEOUT     = 5
 LOOP_TICK         = 15
 HOST_SERVER       = 'host'
+
+TAB_LABELS = {
+    'docker': 'Docker', 'swarm': 'Swarm', 'kubernetes': 'Kubernetes', 'nomad': 'Nomad',
+    'ecs': 'ECS', 'consulcatalog': 'Consul Catalog', 'consul': 'Consul', 'etcd': 'etcd',
+    'redis': 'Redis', 'zookeeper': 'ZooKeeper', 'http_provider': 'HTTP provider',
+    'internal': 'Internal',
+}
 KEY_SEP           = '|'
 
 _state     = {}
@@ -252,12 +262,12 @@ def _agent_certs(agent):
     return [c for c in ((data or {}).get('certs') or []) if isinstance(c, dict)]
 
 
-def _agent_traefik_up(agent) -> bool:
+def _agent_overview(agent):
     try:
-        return _agent_json(agent, '/api/traefik/overview') is not None
+        return _agent_json(agent, '/api/traefik/overview')
     except Exception as e:
         logger.debug(f"Traefik check failed for agent {agent.get('name', '')}: {e}")
-        return False
+        return None
 
 
 def _cert_alert(name, main, resolver, days):
@@ -323,13 +333,13 @@ def _check_certs():
 def _traefik_sources(servers):
     sources = []
     try:
-        sources.append((HOST_SERVER, '', traefik_mod.traefik_api_get('/api/overview') is not None))
+        sources.append((HOST_SERVER, '', traefik_mod.traefik_api_get('/api/overview')))
     except Exception:
         logger.exception("Traefik check failed for the host")
     for server, name, agent in servers:
         try:
             if _agent_usable(agent):
-                sources.append((server, name, _agent_traefik_up(agent)))
+                sources.append((server, name, _agent_overview(agent)))
         except Exception:
             logger.exception(f"Traefik check failed for agent {name}")
     return sources
@@ -339,7 +349,9 @@ def _check_traefik():
     state   = _migrate_host_keys(_section('traefik'))
     servers = _agent_servers()
     raised  = []
-    for server, name, up in _traefik_sources(servers):
+    for server, name, overview in _traefik_sources(servers):
+        raised.extend(_apply_provider_tabs(server, name, overview))
+        up   = overview is not None
         key  = _server_key(server, 'up')
         prev = state.get(key)
         state[key] = up
@@ -484,6 +496,67 @@ def _check_geoip():
     return [('warning', f"GeoIP database is out of date and could not be updated: {info}", 'update')]
 
 
+_provider_seen = {}
+
+
+def _apply_provider_tabs(server, name, overview):
+    found = providers_mod.tabs_from_overview(overview)
+    if not found or _provider_seen.get(server) == found:
+        return []
+    _provider_seen[server] = set(found)
+    try:
+        turned = (_enable_host_provider_tabs(found) if server == HOST_SERVER
+                  else _enable_agent_provider_tabs(server, found))
+    except Exception:
+        _provider_seen.pop(server, None)
+        logger.exception(f"Could not enable provider tabs for {name or 'the host'}")
+        return []
+    return [('info', _server_msg(name, f"{TAB_LABELS.get(tab, tab)} routers found, the {TAB_LABELS.get(tab, tab)} tab is now shown"), 'config')
+            for tab in turned]
+
+
+def _enable_host_provider_tabs(found):
+    turned = []
+
+    def enable(settings):
+        seen  = list(settings.get('provider_tabs_seen') or [])
+        fresh = providers_mod.newly_seen(found, seen)
+        if not fresh:
+            return None
+        tabs = dict(settings.get('visible_tabs') or {})
+        turned.extend(t for t in fresh if not tabs.get(t))
+        for tab in fresh:
+            tabs[tab] = True
+        return {'visible_tabs': tabs, 'provider_tabs_seen': seen + fresh}
+
+    settings_mod.modify_settings(enable)
+    return turned
+
+
+def _enable_agent_provider_tabs(agent_id, found):
+    turned = []
+
+    def enable(agents):
+        for agent in agents:
+            if agent.get('id') != agent_id:
+                continue
+            seen  = list(agent.get('provider_tabs_seen') or [])
+            fresh = providers_mod.newly_seen(found, seen)
+            if not fresh:
+                return False
+            tabs = dict(agent.get('visible_tabs') or {})
+            turned.extend(t for t in fresh if not tabs.get(t))
+            for tab in fresh:
+                tabs[tab] = True
+            agent['visible_tabs']       = tabs
+            agent['provider_tabs_seen'] = seen + fresh
+            return True
+        return False
+
+    agents_store_mod.modify_agents(enable)
+    return turned
+
+
 def _check_storage():
     state  = _section('storage')
     broken = {}
@@ -513,6 +586,40 @@ _AGENT_EVENT_LABELS = {
 }
 
 
+def _event_cursor(stored):
+    if isinstance(stored, dict):
+        boot = str(stored.get('boot') or '') or None
+        stored = stored.get('id')
+    else:
+        boot = None
+    try:
+        return boot, max(0, int(stored or 0))
+    except (TypeError, ValueError):
+        return boot, 0
+
+
+def _agent_events_reply(agent, path):
+    try:
+        resp = agents_http_mod._agent_request(agent, 'GET', path)
+    except Exception as e:
+        logger.debug(f"Agent event poll failed for {agent.get('name', '')}: {e}")
+        return None
+    if resp is None or getattr(resp, 'status_code', 0) != 200:
+        return None
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _event_latest(data):
+    try:
+        return max(0, int(data.get('latest') or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _check_agent_events():
     state  = _section('agent_events')
     raised = []
@@ -522,27 +629,29 @@ def _check_agent_events():
         if not agent_id or not _agent_usable(agent):
             seen[agent_id] = state.get(agent_id, 0)
             continue
-        since = state.get(agent_id)
-        try:
-            resp = agents_http_mod._agent_request(
-                agent, 'GET', f'/api/events?since={int(since or 0)}')
-        except Exception as e:
-            logger.debug(f"Agent event poll failed for {agent.get('name', '')}: {e}")
-            seen[agent_id] = since or 0
+        stored = state.get(agent_id)
+        boot, since = _event_cursor(stored)
+        query = f'/api/events?since={since}' + (f'&boot={quote(boot, safe="")}' if boot else '')
+        data = _agent_events_reply(agent, query)
+        if data is None:
+            seen[agent_id] = {'boot': boot, 'id': since}
             continue
-        if resp is None or getattr(resp, 'status_code', 0) != 200:
-            seen[agent_id] = since or 0
+        events     = data.get('events') or []
+        latest     = _event_latest(data)
+        reply_boot = str(data.get('boot') or '') or None
+        seen[agent_id] = {'boot': reply_boot, 'id': latest}
+        if stored is None:
             continue
-        try:
-            data = resp.json() or {}
-        except Exception:
-            seen[agent_id] = since or 0
-            continue
-        events = data.get('events') or []
-        latest = data.get('latest') or since or 0
-        seen[agent_id] = latest
-        if since is None:
-            continue
+        if not (reply_boot and boot) and latest < since:
+            events = []
+            if latest > 0:
+                again = _agent_events_reply(agent, '/api/events?since=0')
+                if again is None:
+                    seen[agent_id] = {'boot': reply_boot, 'id': 0}
+                else:
+                    events = again.get('events') or []
+                    seen[agent_id] = {'boot': str(again.get('boot') or '') or reply_boot,
+                                      'id': _event_latest(again)}
         name = str(agent.get('name') or agent_id)
         for item in events[-AGENT_EVENT_MAX:]:
             kind = str(item.get('kind') or '')

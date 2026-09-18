@@ -6,6 +6,8 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +26,7 @@ type APIKey struct {
 
 type keyStore struct {
 	mu           sync.RWMutex
+	saveMu       sync.Mutex
 	path         string
 	keys         []APIKey
 	lastUsedSave time.Time
@@ -43,18 +46,74 @@ func (ks *keyStore) load() {
 	if err != nil {
 		return
 	}
-	_ = json.Unmarshal(data, &ks.keys)
+	var keys []APIKey
+	if err := json.Unmarshal(data, &keys); err != nil {
+		aside := fmt.Sprintf("%s.corrupt-%d", ks.path, time.Now().Unix())
+		log.Printf("keys: %s is not valid JSON, moved it to %s and started without extra keys: %v", ks.path, aside, err)
+		_ = os.Rename(ks.path, aside)
+		ks.keys = []APIKey{}
+		return
+	}
+	if keys == nil {
+		keys = []APIKey{}
+	}
+	ks.keys = keys
 }
 
-func (ks *keyStore) save(keys []APIKey) error {
-	if err := os.MkdirAll(filepath.Dir(ks.path), 0755); err != nil {
+func (ks *keyStore) persist() error {
+	ks.saveMu.Lock()
+	defer ks.saveMu.Unlock()
+	ks.mu.RLock()
+	snap := make([]APIKey, len(ks.keys))
+	copy(snap, ks.keys)
+	ks.mu.RUnlock()
+	if err := os.MkdirAll(filepath.Dir(ks.path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(keys, "", "  ")
+	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ks.path, data, 0600)
+	return writeFileAtomic(ks.path, data, 0o600)
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return writeFileInPlace(path, data, mode)
+	}
+	name := tmp.Name()
+	_, werr := tmp.Write(data)
+	serr := tmp.Sync()
+	cerr := tmp.Chmod(mode)
+	xerr := tmp.Close()
+	if werr != nil || serr != nil || cerr != nil || xerr != nil {
+		os.Remove(name)
+		return writeFileInPlace(path, data, mode)
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return writeFileInPlace(path, data, mode)
+	}
+	return nil
+}
+
+func writeFileInPlace(path string, data []byte, mode os.FileMode) error {
+	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, mode)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+	if _, err := fh.Write(data); err != nil {
+		return err
+	}
+	if err := fh.Truncate(int64(len(data))); err != nil {
+		return err
+	}
+	if err := fh.Sync(); err != nil {
+		return err
+	}
+	return os.Chmod(path, mode)
 }
 
 func hashKey(key string) string {
@@ -72,9 +131,7 @@ func (ks *keyStore) validate(key string) bool {
 			ks.keys[i].LastUsedAt = &now
 			if now.Sub(ks.lastUsedSave) > time.Minute {
 				ks.lastUsedSave = now
-				snap := make([]APIKey, len(ks.keys))
-				copy(snap, ks.keys)
-				go ks.save(snap)
+				go ks.persist()
 			}
 			return true
 		}
@@ -117,26 +174,25 @@ func (ks *keyStore) create(name string) (string, string, error) {
 	}
 	ks.mu.Lock()
 	ks.keys = append(ks.keys, k)
-	snap := make([]APIKey, len(ks.keys))
-	copy(snap, ks.keys)
-	err := ks.save(snap)
 	ks.mu.Unlock()
-	return k.ID, rawKey, err
+	return k.ID, rawKey, ks.persist()
 }
 
 func (ks *keyStore) delete(id string) bool {
 	ks.mu.Lock()
-	defer ks.mu.Unlock()
+	found := false
 	for i, k := range ks.keys {
 		if k.ID == id {
 			ks.keys = append(ks.keys[:i], ks.keys[i+1:]...)
-			snap := make([]APIKey, len(ks.keys))
-			copy(snap, ks.keys)
-			_ = ks.save(snap)
-			return true
+			found = true
+			break
 		}
 	}
-	return false
+	ks.mu.Unlock()
+	if found {
+		_ = ks.persist()
+	}
+	return found
 }
 
 func (a *App) keysListHandler(w http.ResponseWriter, r *http.Request) {

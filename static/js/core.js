@@ -46,7 +46,7 @@ async function _recordNotification(msg, type, category) {
     } catch (e) {}
 }
 
-const OPTIONAL_TABS = ['dashboard', 'routemap', 'docker', 'kubernetes', 'swarm', 'nomad', 'ecs', 'consulcatalog', 'redis', 'etcd', 'consul', 'zookeeper', 'http_provider', 'file_external', 'certs', 'tls', 'crowdsec', 'plugins', 'logs', 'static'];
+const OPTIONAL_TABS = ['dashboard', 'routemap', 'docker', 'kubernetes', 'swarm', 'nomad', 'ecs', 'consulcatalog', 'redis', 'etcd', 'consul', 'zookeeper', 'http_provider', 'file_external', 'internal', 'certs', 'tls', 'crowdsec', 'plugins', 'logs', 'static'];
 
 let _visibleTabsCache = {};
 let _localTabsCache   = {};
@@ -73,6 +73,7 @@ const TAB_DEFS = [
     { id: 'etcd',          label: 'etcd',            icon: 'ph-database' },
     { id: 'consul',        label: 'Consul KV',       icon: 'ph-database' },
     { id: 'zookeeper',     label: 'ZooKeeper',       icon: 'ph-database' },
+    { id: 'internal',      label: 'Internal',        icon: 'ph-traffic-signal' },
     { id: 'http_provider', label: 'HTTP Provider',   icon: 'ph-link' },
     { id: 'file_external', label: 'File (external)', icon: 'ph-file-text' },
 ];
@@ -93,7 +94,7 @@ const SIDE_NAV_GROUPS = [
     { label: 'Traffic',        tabs: ['dashboard', 'services', 'middlewares', 'live', 'routemap'] },
     { label: 'Observability',  tabs: ['logs', 'crowdsec'] },
     { label: 'Infrastructure', tabs: ['certs', 'tls', 'plugins', 'static'] },
-    { label: 'Providers',      tabs: ['docker', 'kubernetes', 'swarm', 'nomad', 'ecs', 'consulcatalog', 'redis', 'etcd', 'consul', 'zookeeper', 'http_provider', 'file_external'] },
+    { label: 'Providers',      tabs: ['docker', 'kubernetes', 'swarm', 'nomad', 'ecs', 'consulcatalog', 'redis', 'etcd', 'consul', 'zookeeper', 'http_provider', 'file_external', 'internal'] },
 ];
 
 function _tabVisible(tab) {
@@ -316,6 +317,7 @@ function switchTab(tab) {
     if (tab === 'consul')        refreshConsulTab();
     if (tab === 'zookeeper')     refreshZookeeperTab();
     if (tab === 'http_provider') refreshHttpProviderTab();
+    if (tab === 'internal')      refreshInternalTab();
     if (tab === 'file_external') refreshFileExternalTab();
     if (tab === 'certs')         refreshCertsTab();
     if (tab === 'tls')           refreshTlsOptionsTab();
@@ -336,6 +338,27 @@ function _buildConfigSelectOptions(sel, files, allowNew) {
     files.forEach(f => { const o = document.createElement('option'); o.value = f; o.textContent = f; sel.appendChild(o); });
 }
 
+let _agentConfigFiles = { id: '', files: null, inflight: null };
+
+function _dropConfigFilesCache() {
+    _agentConfigFiles = { id: '', files: null, inflight: null };
+}
+
+function _agentConfigFileNames() {
+    const id = _activeAgent ? _activeAgent.id : '';
+    if (_agentConfigFiles.id !== id) _agentConfigFiles = { id, files: null, inflight: null };
+    const entry = _agentConfigFiles;
+    if (entry.files) return Promise.resolve(entry.files);
+    if (!entry.inflight) {
+        entry.inflight = agentFetch('/api/configs').then(r => r.json()).then(data => {
+            entry.files = (data.files || []).map(f => f.name).sort();
+            return entry.files;
+        });
+        entry.inflight.catch(() => {}).then(() => { entry.inflight = null; });
+    }
+    return entry.inflight;
+}
+
 async function _populateConfigFileSelect(which) {
     const isRoute = which === 'route';
     const isPluginMw = which === 'pluginMw';
@@ -352,9 +375,7 @@ async function _populateConfigFileSelect(which) {
     if (_activeAgent) {
         if (wrap) wrap.style.display = '';
         try {
-            const r = await agentFetch('/api/configs');
-            const data = await r.json();
-            const files = (data.files || []).map(f => f.name).sort();
+            const files = await _agentConfigFileNames();
             _buildConfigSelectOptions(sel, files, true);
             sel.value = files.length === 1 ? files[0] : '';
             onChange(sel);
@@ -424,7 +445,7 @@ function _dCount(n) {
 
 async function _errText(res, fallback) {
     if (res && res.status === 502) return 'Cannot reach the agent. Check that it is running and reachable.';
-    if (res && res.status === 401) return 'Session expired. Sign in again.';
+    if (res && res.status === 401) { tabCacheClear(); return 'Session expired. Sign in again.'; }
     if (res && res.status === 403) return 'Not allowed. Your session may have expired.';
     if (res && res.status === 404) return fallback + ' (not found)';
     try {
@@ -453,6 +474,99 @@ function _netErrText(err, fallback) {
         return 'No response from Traefik Manager. Check that it is still running.';
     }
     return msg ? `${fallback}: ${msg.slice(0, 200)}` : fallback;
+}
+
+
+const REFRESH_SPIN_MIN_MS = 400;
+const _refreshCallRe = /^\s*(refresh\w*)\(([^)]*)\)\s*;?\s*$/;
+
+function _refreshSpinTarget(el) {
+    const btn = el && el.closest ? el.closest('button[onclick]') : null;
+    if (!btn || !btn.querySelector('.ph-arrows-clockwise')) return null;
+    return _refreshCallRe.test(btn.getAttribute('onclick') || '') ? btn : null;
+}
+
+function _spinRefreshButton(btn) {
+    const icon = btn.querySelector('.ph-arrows-clockwise');
+    const code = btn.getAttribute('onclick');
+    let result;
+    btn.disabled = true;
+    if (icon) icon.classList.add('animate-spin');
+    try { result = new Function('return ' + code)(); } catch (e) { console.error('refresh failed:', e); }
+    const done = Promise.allSettled([Promise.resolve(result), new Promise(r => setTimeout(r, REFRESH_SPIN_MIN_MS))]);
+    done.then(() => {
+        btn.disabled = false;
+        if (icon) icon.classList.remove('animate-spin');
+    });
+    return done;
+}
+
+document.addEventListener('click', e => {
+    const btn = _refreshSpinTarget(e.target);
+    if (!btn || btn.disabled) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    _spinRefreshButton(btn);
+}, true);
+
+const TAB_CACHE_PREFIX = 'tm.tab.';
+const _tabCacheHydrated = new Set();
+
+function _tabCacheKey(name) {
+    const who = (typeof _activeAgent !== 'undefined' && _activeAgent) ? _activeAgent.id : 'host';
+    return TAB_CACHE_PREFIX + (window._tmAssetVersion || '0') + '.' + who + '.' + name;
+}
+
+function tabCacheGet(name) {
+    try {
+        const raw = sessionStorage.getItem(_tabCacheKey(name));
+        return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+}
+
+function _tabCacheKeys(suffix) {
+    const out = [];
+    try {
+        for (let i = 0; i < sessionStorage.length; i++) {
+            const k = sessionStorage.key(i);
+            if (k && k.startsWith(TAB_CACHE_PREFIX) && (!suffix || k.endsWith('.' + suffix))) out.push(k);
+        }
+    } catch (_) {}
+    return out;
+}
+
+function tabCacheDrop(name) {
+    _tabCacheKeys(name).forEach(k => { try { sessionStorage.removeItem(k); } catch (_) {} });
+}
+
+function tabCacheClear() {
+    tabCacheDrop('');
+    _tabCacheHydrated.clear();
+}
+
+function tabCacheForgetAll() {
+    _tabCacheHydrated.clear();
+}
+
+function tabCachePut(name, data) {
+    let raw;
+    try { raw = JSON.stringify(data); } catch (_) { return false; }
+    const key = _tabCacheKey(name);
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try { sessionStorage.setItem(key, raw); return true; }
+        catch (_) { tabCacheDrop('crowdsec'); }
+    }
+    return false;
+}
+
+function tabCacheHydrate(name, paint) {
+    const key = _tabCacheKey(name);
+    if (_tabCacheHydrated.has(key)) return false;
+    const data = tabCacheGet(name);
+    if (data === null) return false;
+    _tabCacheHydrated.add(key);
+    try { paint(data); } catch (e) { console.error('tabCacheHydrate failed:', e); return false; }
+    return true;
 }
 
 
@@ -803,15 +917,35 @@ function _copyCode(btn, text) {
     });
 }
 
+let _tlsOptionsCache = { server: null, list: null, inflight: null };
+
+function _dropTlsOptionsCache() {
+    _tlsOptionsCache = { server: null, list: null, inflight: null };
+}
+
+function _tlsOptionNames() {
+    const server = (typeof _activeAgent !== 'undefined' && _activeAgent) ? _activeAgent.id : '';
+    if (_tlsOptionsCache.server !== server) _tlsOptionsCache = { server, list: null, inflight: null };
+    const entry = _tlsOptionsCache;
+    if (entry.list) return Promise.resolve(entry.list);
+    if (!entry.inflight) {
+        entry.inflight = fetch('/api/tls-options' + (server ? '?server=' + encodeURIComponent(server) : ''))
+            .then(r => r.json()).then(opts => {
+                entry.list = (Array.isArray(opts) ? opts : []).map(o => o.name).filter(Boolean);
+                return entry.list;
+            });
+        entry.inflight.catch(() => {}).then(() => { entry.inflight = null; });
+    }
+    return entry.inflight;
+}
+
 async function _populateTlsOptionsSelect() {
     const sel = document.getElementById('tlsOptionsProfileSelect');
     if (!sel) return;
     const current = sel.value;
     try {
-        const res = await fetch('/api/tls-options');
-        const opts = await res.json();
-        const inner = `<option value="">None (default)</option>` + opts.map(o => `<option value="${_esc(o.name)}">${_esc(o.name)}</option>`).join('');
-        sel.innerHTML = inner;
+        const names = await _tlsOptionNames();
+        sel.innerHTML = `<option value="">None (default)</option>` + names.map(n => `<option value="${_esc(n)}">${_esc(n)}</option>`).join('');
         sel.value = current;
     } catch(e) {}
 }
@@ -883,7 +1017,7 @@ async function geoLookup(ips) {
 
 function _flagEmoji(cc) {
     if (!cc || cc.length !== 2) return '';
-    try { return String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1E6 + c.charCodeAt(0) - 65)); }
+    try { return '<span class="tm-flag">' + String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1E6 + c.charCodeAt(0) - 65)) + '</span>'; }
     catch(_) { return ''; }
 }
 
@@ -967,7 +1101,7 @@ function _geoPanelHtml(panelId, countryData, activeCC, onClearAttr) {
     const top = entries.slice(0, 8).map(([cc, d]) => {
         const sel = activeCC === cc;
         const pct = (d.count / total * 100).toFixed(1);
-        return `<div class="lg-row${sel ? ' lg-row-on' : ''}" role="button" tabindex="0" onclick="${panelId}_click('${cc}')" title="${_esc(d.name)} - ${d.count.toLocaleString()} requests, ${pct}%">
+        return `<div class="lg-row${sel ? ' lg-row-on' : ''}" role="button" tabindex="0" onclick="${panelId}_click(${_jsArg(cc)})" title="${_esc(d.name)} - ${d.count.toLocaleString()} requests, ${pct}%">
             <span class="lg-id"><span class="lg-g">${_flagEmoji(cc)}</span><span class="lg-name">${_esc(d.name)}</span></span>
             <span class="lg-bad"></span>
             <span class="lg-n">${d.count.toLocaleString()}</span>
@@ -1087,6 +1221,10 @@ async function loadIpDiagnostic() {
         <div class="rounded-xl p-3 mb-3" style="background:var(--card);border:1px solid var(--border)">
             ${row('App sees (client)', d.effective_ip, d.effective_class)}
             ${row('Socket peer', d.socket_peer, d.socket_peer_class, 'The direct TCP connection - your reverse proxy, or the real client if none.')}
+            <div class="flex items-center gap-2 py-2" style="border-bottom:1px solid var(--border)">
+                <span class="text-xs" style="color:var(--muted);min-width:120px">Proxy trusted</span>
+                <span class="text-xs font-mono" style="color:var(--text)">${d.proxy_trusted === undefined ? '-' : (d.proxy_trusted ? 'yes' : 'no')}</span>
+            </div>
             <div class="flex items-center gap-2 py-2">
                 <span class="text-xs" style="color:var(--muted);min-width:120px">Trusted hops</span>
                 <span class="text-xs font-mono" style="color:var(--text)">${d.proxy_hops}</span>
@@ -1096,6 +1234,7 @@ async function loadIpDiagnostic() {
         <div class="rounded-xl p-3 mb-3" style="background:var(--card);border:1px solid var(--border)">
             ${hdrRows}
         </div>
+        ${d.proxy_trusted === false && ((d.headers || {})['X-Forwarded-For'] || (d.headers || {})['X-Forwarded-Proto'] || (d.headers || {})['X-Forwarded-Host']) ? `<div class="rounded-xl p-3 mb-3 text-xs" style="background:rgba(210,153,34,0.1);border:1px solid rgba(210,153,34,0.3);color:var(--text)"><i class="ph-bold ph-warning" style="color:var(--yellow);margin-right:6px"></i>Forwarding headers arrived from <strong>${_esc(d.socket_peer || '')}</strong>, which is not in <code class="font-mono">TRUSTED_PROXIES</code>, so they were ignored. If that address is your reverse proxy, add it to <code class="font-mono">TRUSTED_PROXIES</code>.</div>` : ''}
         ${spoofable ? `<div class="rounded-xl p-3 text-xs" style="background:rgba(210,153,34,0.1);border:1px solid rgba(210,153,34,0.3);color:var(--text)"><i class="ph-bold ph-warning" style="color:var(--yellow);margin-right:6px"></i>The client IP the app trusts is <strong>${_esc(d.effective_class)}</strong>. If clients should reach you from the public internet, a proxy in front is rewriting it - check that your trusted hops and the upstream <code class="font-mono">trustedIPs</code> are set correctly, or real client IPs will be lost to logs, CrowdSec and ipAllowList.</div>` : ''}`;
 }
 

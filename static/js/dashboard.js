@@ -18,7 +18,7 @@ const SD_PROV = {
     zookeeper:         { g: 'ph-database',      tab: 'zookeeper' },
     http:              { g: 'ph-link',          tab: 'http_provider' },
     file:              { g: 'ph-file-text',     tab: 'services' },
-    internal:          { g: 'ph-gear-six',      tab: 'live' },
+    internal:          { g: 'ph-traffic-signal', tab: 'internal' },
 };
 
 const SD_CARD_META = {
@@ -200,7 +200,11 @@ function _sdObj(raw, kind, ctx) {
             if (o.composite) { o.reason = o.composite + ' service, health lives on its children'; return o; }
             o.cell = 'idle'; o.reason = 'no health check configured'; o.unchecked = true; return o;
         }
-        if (o.backends.down > 0) {
+        if (o.backends.down > 0 && o.backends.up === 0) {
+            o.cell = 'err';
+            o.reason = 'all ' + o.backends.total + ' backends DOWN';
+            o.down = true;
+        } else if (o.backends.down > 0) {
             o.cell = 'warn';
             o.reason = o.backends.down + ' of ' + o.backends.total + ' backends DOWN';
             o.degraded = true;
@@ -383,6 +387,7 @@ function _sdSubOffender(objs, tail) {
     const more = worst.length - 1;
     const head = '<b>' + _esc(first.name || first.short) + '</b> ';
     const count = more > 0 ? ', +' + _sdNum(more) + ' more' : '';
+    if (tail && !more && String(first.reason || '').toLowerCase() === String(tail).toLowerCase()) tail = '';
     const parts = _sdSubParts(head + _esc(_sdTerse(first.reason)) + count, tail);
     parts.full = _sdPlain(head + _esc(first.reason) + count + (tail ? SD_SEP + tail : ''));
     return parts;
@@ -476,7 +481,7 @@ function _sdEpGlyphs(ep, info) {
         g.push(['ph-bold ph-lock-simple-open', 'd-off',
             'No entry-point-level TLS, and no router on it reports TLS either']);
     }
-    if (info.internalOnly) g.push(['ph-bold ph-gear-six', 'd-off', 'Serves internal routers only']);
+    if (info.internalOnly) g.push(['ph-bold ph-traffic-signal', 'd-off', 'Serves internal routers only']);
     if (pp.length) g.push(['ph-bold ph-shield-check', 'd-off', 'PROXY protocol trusted from ' + pp.join(', ')]);
     return g.map(x => '<i class="' + x[0] + ' d-glyph ' + x[1] + '" title="' + _esc(x[2]) + '"></i>').join('');
 }
@@ -744,8 +749,27 @@ function _sdBackendTxt(b, total) {
     return total ? 'no health checks configured' : '';
 }
 
+function _sdShowSkeleton() {
+    const panel = document.getElementById('statsPanel');
+    if (panel && _sdSkeletonHtml !== null) panel.innerHTML = _sdSkeletonHtml;
+}
+
+window._sdServerChanged = function() {
+    _rhMap = {};
+    _rhMeta.loaded = false;
+    _rhMeta.checked_at = null;
+    _sdApiStatusMap = null;
+    _sdModel = null;
+    _sdScope = null;
+    const cached = tabCacheGet('stats');
+    if (cached && cached.overview !== undefined) _sdApplyPayloads(cached);
+    else _sdShowSkeleton();
+};
+
 function _sdRender(model) {
     _sdBind();
+    const panel = document.getElementById('statsPanel');
+    if (_sdSkeletonHtml === null && panel) _sdSkeletonHtml = panel.innerHTML;
     const gridEl = document.getElementById('statsGrid');
     const verdEl = document.getElementById('sigVerdict');
     const keyEl  = document.getElementById('sigKey');
@@ -818,7 +842,8 @@ function _sdRender(model) {
         sub: v.total === 0 ? _sdSubPlain(emptyTxt('service')) : _sdSubOffender(v.objs, backendTxt),
         flags: [
             v.t.disabled && _sdExc('d-bad',  'ph-fill ph-x-circle',            v.t.disabled, 'disabled',      'tab=live;svcstatus=error',   v.groups.disabled),
-            v.t.degraded && _sdExc('d-warn', 'ph-fill ph-arrow-fat-line-down', v.t.degraded, 'backends down', 'tab=live;svcstatus=warning', v.groups.degraded),
+            v.t.down     && _sdExc('d-bad',  'ph-fill ph-arrow-fat-line-down', v.t.down,     'down',          'tab=live;svcstatus=error',   v.groups.down),
+            v.t.degraded && _sdExc('d-warn', 'ph-fill ph-warning-diamond',     v.t.degraded, 'degraded',      'tab=live;svcstatus=warning', v.groups.degraded),
             v.t.warning  && _sdExc('d-warn', 'ph-fill ph-warning',             v.t.warning,  'warnings',      'tab=live;svcstatus=warning', v.groups.warning),
             v.t.composite && _sdExc('d-off', 'ph-bold ph-share-network',        v.t.composite, 'composite',    'tab=live',                   v.groups.composite),
         ].filter(Boolean),
@@ -880,7 +905,8 @@ function _sdRender(model) {
         if (m.http.t.warning)        items.push(_sdExc('d-warn', 'ph-fill ph-warning',             m.http.t.warning,        'router warnings',      'tab=services;proto=http;apistatus=warning',  m.http.groups.warning));
         if (m.stream.t.disabled)     items.push(_sdExc('d-bad',  'ph-fill ph-x-circle',            m.stream.t.disabled,     'stream disabled',      sGo + ';apistatus=disabled',                  m.stream.groups.disabled));
         if (m.service.t.disabled)    items.push(_sdExc('d-bad',  'ph-fill ph-x-circle',            m.service.t.disabled,    'services disabled',    'tab=live;svcstatus=error',                   m.service.groups.disabled));
-        if (m.service.t.degraded)    items.push(_sdExc('d-warn', 'ph-fill ph-arrow-fat-line-down', m.service.t.degraded,    'backends down',        'tab=live;svcstatus=warning',                 m.service.groups.degraded));
+        if (m.service.t.down)        items.push(_sdExc('d-bad',  'ph-fill ph-arrow-fat-line-down', m.service.t.down,        'services down',        'tab=live;svcstatus=error',                   m.service.groups.down));
+        if (m.service.t.degraded)    items.push(_sdExc('d-warn', 'ph-fill ph-warning-diamond',     m.service.t.degraded,    'services degraded',    'tab=live;svcstatus=warning',                 m.service.groups.degraded));
         if (m.service.t.warning)     items.push(_sdExc('d-warn', 'ph-fill ph-warning',             m.service.t.warning,     'service warnings',     'tab=live;svcstatus=warning',                 m.service.groups.warning));
         if (m.middleware.t.disabled) items.push(_sdExc('d-bad',  'ph-fill ph-x-circle',            m.middleware.t.disabled, 'middlewares disabled', 'tab=middlewares',                            m.middleware.groups.disabled));
 
@@ -1046,6 +1072,7 @@ function _sdRender(model) {
 }
 
 let _sdApiStatusMap = null;
+let _sdSkeletonHtml = null;
 let _rhMap  = {};
 const _rhMeta = { enabled: true, interval: 300, checked_at: null, loaded: false };
 window._rhMeta = _rhMeta;
@@ -1204,6 +1231,56 @@ function _sdApplyRouteCards() {
     });
 }
 
+function _sdApplyPayloads(p) {
+    if (p.version && p.version.Version) {
+        _currentVersion = p.version.Version;
+        document.getElementById('versionText').textContent = 'v' + _currentVersion;
+        const vtm = document.getElementById('versionTextMobile');
+        if (vtm) vtm.textContent = 'v' + _currentVersion;
+        if (tmPref('showTraefikBadge')) {
+            document.getElementById('versionBadge')?.classList.remove('hidden');
+            document.getElementById('versionBadgeMobile')?.classList.remove('hidden');
+            document.getElementById('versionBadgeMobile')?.classList.add('flex');
+        }
+    }
+
+    const model = _sdBuild({
+        overview:    p.overview || null,
+        routers:     p.routers || null,
+        services:    p.services || null,
+        middlewares: p.middlewares || null,
+        version:     p.version || null,
+        entrypoints: Array.isArray(p.entrypoints) ? p.entrypoints : [],
+    });
+
+    if (_sdScope) {
+        const known = new Set();
+        ['http', 'stream', 'service', 'middleware'].forEach(k => model.objs[k].forEach(o => known.add(o.provider)));
+        if (!known.has(_sdScope)) _sdScope = null;
+    }
+
+    _sdStamp = Date.now();
+    _sdModel = model;
+    _sdRender(model);
+
+    setTabCount('docker', model.pairs.filter(p => p.obj.provider === 'docker').length || '-');
+    if (model.avail.service) setTabCount('live', model.counts.allSvc);
+
+    _sdApiStatusMap = {};
+    model.pairs.forEach(pair => {
+        _sdApiStatusMap[pair.obj.short] = {
+            status: pair.obj.status,
+            raw: pair.obj.rawStatus,
+            error: pair.obj.errors,
+            unbound: !!pair.obj.unbound,
+            eps: _sdUsing(pair.raw),
+        };
+    });
+    _sdApplyRouteCards();
+    if (typeof filterRoutes === 'function' && document.getElementById('searchRoutes')) filterRoutes();
+    return model;
+}
+
 async function loadOverviewStats() {
     const runServer = _activeAgent ? _activeAgent.id : '';
     try {
@@ -1226,61 +1303,27 @@ async function loadOverviewStats() {
             return v;
         };
 
-        const apiUp = version.status === 'fulfilled' && version.value && version.value.Version;
-        const dotColor = apiUp ? 'var(--green)' : 'var(--red)';
-        const dotEl  = document.getElementById('apiStatusDot');
-        const dotElM = document.getElementById('apiStatusDotMobile');
-        if (dotEl)  dotEl.style.background  = dotColor;
-        if (dotElM) dotElM.style.background = dotColor;
-
-        if (apiUp) {
-            _currentVersion = version.value.Version;
-            document.getElementById('versionText').textContent = 'v' + _currentVersion;
-            const vtm = document.getElementById('versionTextMobile');
-            if (vtm) vtm.textContent = 'v' + _currentVersion;
-            if (tmPref('showTraefikBadge')) {
-                document.getElementById('versionBadge')?.classList.remove('hidden');
-                document.getElementById('versionBadgeMobile')?.classList.remove('hidden');
-                document.getElementById('versionBadgeMobile')?.classList.add('flex');
-            }
-            checkForUpdate(_currentVersion);
-            checkTraefikAdvisories(_currentVersion);
-        }
-
-        const model = _sdBuild({
+        const payloads = {
             overview:    val(overview, null),
             routers:     val(routers, null),
             services:    val(services, null),
             middlewares: val(middlewares, null),
             version:     val(version, null),
             entrypoints: (entrypoints.status === 'fulfilled' && Array.isArray(entrypoints.value)) ? entrypoints.value : [],
-        });
-
-        if (_sdScope) {
-            const known = new Set();
-            ['http', 'stream', 'service', 'middleware'].forEach(k => model.objs[k].forEach(o => known.add(o.provider)));
-            if (!known.has(_sdScope)) _sdScope = null;
+        };
+        const apiUp = !!(payloads.version && payloads.version.Version);
+        const dotColor = apiUp ? 'var(--green)' : 'var(--red)';
+        const dotEl  = document.getElementById('apiStatusDot');
+        const dotElM = document.getElementById('apiStatusDotMobile');
+        if (dotEl)  dotEl.style.background  = dotColor;
+        if (dotElM) dotElM.style.background = dotColor;
+        if (apiUp) {
+            checkForUpdate(payloads.version.Version);
+            checkTraefikAdvisories(payloads.version.Version);
         }
 
-        _sdStamp = Date.now();
-        _sdModel = model;
-        _sdRender(model);
-
-        setTabCount('docker', model.pairs.filter(p => p.obj.provider === 'docker').length || '-');
-        if (model.avail.service) setTabCount('live', model.counts.allSvc);
-
-        _sdApiStatusMap = {};
-        model.pairs.forEach(p => {
-            _sdApiStatusMap[p.obj.short] = {
-                status: p.obj.status,
-                raw: p.obj.rawStatus,
-                error: p.obj.errors,
-                unbound: !!p.obj.unbound,
-                eps: _sdUsing(p.raw),
-            };
-        });
-        _sdApplyRouteCards();
-        if (typeof filterRoutes === 'function' && document.getElementById('searchRoutes')) filterRoutes();
+        tabCachePut('stats', payloads);
+        const model = _sdApplyPayloads(payloads);
 
         if (model.entrypoints.length && !_activeAgent) {
             const epNames = model.entrypoints.map(e => e.name);

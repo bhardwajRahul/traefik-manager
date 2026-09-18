@@ -25,7 +25,7 @@ TM handles authentication automatically when proxying calls through `/api/agents
 | Method | Path | Description |
 |---|---|---|
 | GET | `/health` | Health check - no auth required |
-| GET | `/api/events` | Failures the agent could not report in a response, newest last - `?since=<id>` returns only newer ones |
+| GET | `/api/events` | Failures the agent could not report in a response, newest last - `?since=<id>&boot=<token>` returns only newer ones |
 | GET | `/api/traefik/overview` | Traefik API overview |
 | GET | `/api/traefik/routers` | Routers across all protocols - returns `{"http":[...],"tcp":[...],"udp":[...]}` |
 | GET | `/api/traefik/router/{protocol}/{name}` | One router as Traefik reports it, including its provider labels |
@@ -33,7 +33,9 @@ TM handles authentication automatically when proxying calls through `/api/agents
 | GET | `/api/traefik/middlewares` | Middlewares across all protocols - returns `{"http":[...],"tcp":[...]}` |
 | GET | `/api/traefik/entrypoints` | Entrypoints |
 | GET | `/api/traefik/version` | Traefik version |
-| GET | `/api/traefik/logs` | Last N access log lines (requires `ACCESS_LOG_PATH`) - `?lines=100`, capped at 1000 |
+| GET | `/api/traefik/logs` | Last N access log lines (requires `ACCESS_LOG_PATH`) - `?lines=100`, a positive whole number capped at 1000 |
+| GET | `/api/traefik/certs/status` | Whether this agent can remove certificates: `available`, `writable`, `restart_method`, `reason`, `paths` |
+| POST | `/api/traefik/certs/delete` | Remove entries from `acme.json` and restart Traefik - body: `{"certs": [{"resolver": "...", "main": "..."}]}`. Refused unless the mount is writable and `RESTART_METHOD` is set |
 | GET | `/api/traefik/certs` | Certificates from acme.json (requires `ACME_JSON_PATH`) |
 | GET | `/api/traefik/plugins` | Plugins declared in the agent's static config (requires `STATIC_CONFIG_PATH`) |
 | GET | `/api/configs` | Read dynamic config file(s) |
@@ -44,15 +46,17 @@ TM handles authentication automatically when proxying calls through `/api/agents
 | POST | `/api/static/restart` | Restart Traefik (requires `RESTART_METHOD`) |
 | GET | `/api/crowdsec/decisions` | CrowdSec active decisions (requires CrowdSec config) |
 | POST | `/api/crowdsec/decisions` | Add a decision - body: `{"value": "<ip>", "type": "ban", "duration": "24h", "reason": "..."}`; `type` is `ban`, `captcha` or `bypass` |
-| GET | `/api/crowdsec/alerts` | CrowdSec recent alerts - `?limit=N` (0 to 100000, defaults to `CROWDSEC_ALERT_LIMIT`). Returns `X-CS-Alert-Limit` and `X-CS-Alert-Capped` (`1` when the response hit the limit) |
+| GET | `/api/crowdsec/alerts` | CrowdSec recent alerts - `?limit=N` (0 to 100000, defaults to `CROWDSEC_ALERT_LIMIT`), `?full=1` forces a full resync of the alert cache. Returns `X-CS-Alert-Limit` and `X-CS-Alert-Capped` (`1` when the response hit the limit) |
+| GET | `/api/crowdsec/summary` | Decision counts, decisions added by hand and trimmed alerts in one response - `?version=<v>` answers `{"version", "unchanged": true}` when nothing changed, `?limit=N` as for alerts, `?full=1` resyncs both caches. Same shape as the Host endpoint |
+| GET | `/api/crowdsec/decisions/search` | One page of active decisions filtered on the agent - `q`, `origin`, `type`, `ip`, `scenario`, `page`, `per`. Same shape as the Host endpoint |
 | DELETE | `/api/crowdsec/decisions/<id>` | Unban an IP |
 | GET | `/api/backups` | List local `.bak` backup files |
 | POST | `/api/backup/create` | Create `.bak` backups for all config files (one per file) |
-| POST | `/api/restore/<filename>` | Restore a config file from a `.bak` backup |
+| POST | `/api/restore/<filename>` | Restore a config file or certificate store from a `.bak` backup |
 | POST | `/api/backup/delete/<filename>` | Delete a `.bak` backup file |
 | GET | `/api/backup/git/status` | Git backup status |
 | POST | `/api/backup/git/push` | Manual git push |
-| POST | `/api/backup/git/test` | Test git connectivity |
+| POST | `/api/backup/git/test` | Test git connectivity. Refuses link-local targets and does not follow redirects |
 | GET | `/api/backup/git/commits` | Last 50 commits |
 | GET | `/api/backup/git/commit/<sha>/diff` | Per-file diff for a commit |
 | POST | `/api/backup/git/restore/<sha>` | Restore configs from a git commit |
@@ -70,7 +74,7 @@ failure there has no response left to report in, so the agent keeps the last 100
 Traefik Manager collects them every two minutes and raises them as notifications.
 
 ```
-GET /api/events?since=12
+GET /api/events?since=12&boot=5f0c9a1e2b7d4c38a6e1f09b3d2c7a41
 ```
 
 ```json
@@ -78,12 +82,12 @@ GET /api/events?since=12
   "events": [
     { "id": 13, "at": 1756574400, "kind": "git", "message": "auto-push failed: no remote" }
   ],
-  "latest": 13
+  "latest": 13,
+  "boot": "5f0c9a1e2b7d4c38a6e1f09b3d2c7a41"
 }
 ```
 
-Pass the previous `latest` back as `since` to get only what is new. `kind` is one of `git`,
-`restart`, `backup` or `storage`. The list lives in memory, so it starts empty after a restart.
+Pass the previous `latest` back as `since` and the previous `boot` back as `boot` to get only what is new. `boot` changes every time the agent starts, and a `boot` that no longer matches returns every event, since IDs start again at 1. `kind` is one of `git`, `restart`, `backup` or `storage`. The list lives in memory, so it starts empty after a restart.
 
 ## Health check
 
@@ -112,6 +116,8 @@ All errors return `{"error": "message", "ok": false}`.
 ## Backup format
 
 Local backups are per-file `.bak` files, not zip archives, named `filename.YYYYMMDD_HHMMSS.bak` (e.g. `dynamic.yml.20250601_143022.bak`) with a UTC timestamp. When restoring, the agent strips the timestamp suffix to recover the original filename and writes it back to `CONFIG_PATH` - or to `STATIC_CONFIG_PATH` when the recovered name is that of the static config file. A `.bak` of the destination is taken before the restore overwrites it.
+
+A certificate store backup goes back into its `acme.json` in place at mode `600`. It needs a writable mount and `RESTART_METHOD`, and restarts Traefik. When two stores share a file name, their backups carry the store's folder, for example `a-acme.json.20250601_143022.bak`. Any other name must match a dynamic config file, or the restore answers `400`.
 
 `POST /api/backup/create` creates one `.bak` per config file found in `CONFIG_PATH` (and `STATIC_CONFIG_PATH` if configured) in a single request. `POST /api/configs` also creates a `.bak` for the affected file before writing.
 

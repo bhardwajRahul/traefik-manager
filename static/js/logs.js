@@ -1,5 +1,6 @@
 let _allLogLines     = [];
 let _currentLogLines = 100;
+const LG_CACHE_LINES = 1000;
 let _logCountryFilter = '';
 let _logParsed  = [];
 let _logRows    = [];
@@ -68,9 +69,19 @@ function _lgScrollEl() {
 
 document.addEventListener('visibilitychange', () => { if (typeof _lgAutoSync === 'function') _lgAutoSync(); });
 
+function _lgHydrate(c) {
+    _allLogLines = Array.isArray(c.lines) ? c.lines : [];
+    _logParsed   = _allLogLines.map(raw => ({ raw, e: parseLogLine(raw) }));
+    _lgStamp     = c.at || Date.now();
+    _lgLoadError = '';
+    _lgBind();
+    renderLogs();
+}
+
 async function refreshLogs(silent) {
     const container = document.getElementById('logsContent');
     const stats = document.getElementById('logStats');
+    if (!silent && tabCacheHydrate('logs', _lgHydrate)) silent = true;
     const keepScroll = silent ? (_lgScrollEl() || {}).scrollTop || 0 : 0;
     if (!silent) container.innerHTML = `<div class="text-center py-16" style="color:var(--muted)"><i class="ph-light ph-spinner-gap text-4xl block mb-3 animate-spin opacity-40"></i><p>Loading logs...</p></div>`;
     try {
@@ -107,6 +118,7 @@ async function refreshLogs(silent) {
         _allLogLines = res.lines || [];
         _logParsed = _allLogLines.map(raw => ({ raw, e: parseLogLine(raw) }));
         _lgStamp = Date.now();
+        tabCachePut('logs', { lines: _allLogLines.slice(-LG_CACHE_LINES), at: _lgStamp });
         await loadGeoStatus();
         if (_geoEnabled && _geoAvailable) {
             await geoLookup(_logParsed.map(o => o.e && o.e.ip).filter(Boolean));
@@ -1366,7 +1378,7 @@ function openLogDetail(e) {
     const _g = _geoCache[e.ip];
     const rows = [
         ['Path', e.path], ['IP', e.ip], ['Date', e.date],
-        ...(_g && _g.country_code ? [['Country', `${_flagEmoji(_g.country_code)} ${_g.country_name || _g.country_code}`]] : []),
+        ...(_g && _g.country_code ? [['Country', `${_flagEmoji(_g.country_code)} ${_esc(_g.country_name || _g.country_code)}`, true]] : []),
         ...(e.domain ? [['Domain', e.domain]] : []),
         ...(e.scheme ? [['Scheme', e.scheme]] : []),
         ...(e.ep ? [['Entry Point', e.ep]] : []),
@@ -1379,8 +1391,8 @@ function openLogDetail(e) {
         ...(e.service ? [['Service', e.service]] : []),
         ...(e.serviceUrl && e.serviceUrl !== '-' ? [['Backend URL', e.serviceUrl]] : []),
     ];
-    document.getElementById('ldGrid').innerHTML = rows.map(([k,v],i) =>
-        `<div class="flex items-start gap-3 px-4 py-2.5" style="${i<rows.length-1?'border-bottom:1px solid var(--border)':''}"><span class="text-xs font-medium flex-shrink-0" style="color:var(--muted);min-width:80px">${k}</span><span class="text-xs font-mono break-all" style="color:var(--text)">${_esc(v)}</span></div>`
+    document.getElementById('ldGrid').innerHTML = rows.map(([k,v,html],i) =>
+        `<div class="flex items-start gap-3 px-4 py-2.5" style="${i<rows.length-1?'border-bottom:1px solid var(--border)':''}"><span class="text-xs font-medium flex-shrink-0" style="color:var(--muted);min-width:80px">${k}</span><span class="text-xs font-mono break-all" style="color:var(--text)">${html ? v : _esc(v)}</span></div>`
     ).join('');
     document.getElementById('ldRaw').textContent = e.raw;
     document.getElementById('logDetailPanel').classList.add('open');

@@ -2,11 +2,11 @@ import glob
 import os
 import re
 
-import yaml
+from core.config import yaml_safe
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-RUNTIME_SUPPLIED = {'HOSTNAME', 'PATH', 'TZ', 'PWD', 'HOME', 'PATH_INFO', 'SCRIPT_NAME'}
+RUNTIME_SUPPLIED = {'HOSTNAME', 'PATH', 'TZ', 'PWD', 'HOME', 'PATH_INFO', 'SCRIPT_NAME', 'REMOTE_ADDR'}
 READ_BY_A_LIBRARY = {'DOCKER_HOST'}
 READ_IN_A_LOOP = {'STATIC_CONFIG_PATH', 'ACCESS_LOG_PATH', 'ACME_JSON_PATH', 'PLUGINS_DIR'}
 
@@ -22,12 +22,14 @@ def _documented(path):
 
 def _host_env_vars():
     found = set()
-    for rel in ['app.py'] + [os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, 'core', '*.py'))]:
+    for rel in ['app.py', 'gunicorn.conf.py'] + [os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, 'core', '*.py'))]:
         src = _read(rel)
         found |= set(re.findall(r"environ\.get\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
         found |= set(re.findall(r"environ\[\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
         found |= set(re.findall(r"_env_bool\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
         found |= set(re.findall(r"_cs_int_env\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
+        found |= set(re.findall(r"failure_limit\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
+        found |= set(re.findall(r"_int\(\s*['\"]([A-Z][A-Z0-9_]*)['\"]", src))
     return found - RUNTIME_SUPPLIED
 
 
@@ -59,7 +61,7 @@ def test_the_env_examples_invent_nothing():
 def test_the_sample_manager_yml_is_read_back_as_written(tmp_path, monkeypatch):
     import core.env as env_mod
     import core.settings as settings_mod
-    sample = yaml.safe_load(_read('manager.yml'))
+    sample = yaml_safe.load(_read('manager.yml'))
     cfg = tmp_path / 'cfg'
     cfg.mkdir()
     (cfg / 'manager.yml').write_text(_read('manager.yml'), encoding='utf-8')
@@ -74,7 +76,7 @@ def test_the_sample_manager_yml_is_read_back_as_written(tmp_path, monkeypatch):
 
 
 def test_the_sample_covers_every_oidc_key():
-    sample = yaml.safe_load(_read('manager.yml'))
+    sample = yaml_safe.load(_read('manager.yml'))
     oidc = [k for k in sample if k.startswith('oidc_')]
     assert len(oidc) == 10, f'the sample has {len(oidc)} oidc keys, the code has 10: {sorted(oidc)}'
 

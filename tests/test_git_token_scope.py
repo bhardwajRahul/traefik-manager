@@ -76,3 +76,51 @@ def test_a_caller_supplied_token_still_works_for_a_new_repo(client):
         assert sink.seen, 'a user testing new credentials must still be able to'
     finally:
         sink.close()
+
+
+def _helper_config(tmp_path, stored_line=''):
+    store = tmp_path / 'git-credentials'
+    if stored_line:
+        store.write_text(stored_line + '\n')
+    cfg = tmp_path / 'gitconfig'
+    cfg.write_text('[credential]\n\thelper = store --file %s\n' % store)
+    return cfg, store
+
+
+def test_a_git_credential_helper_is_never_consulted(client, tmp_path, monkeypatch):
+    sink = _Sink()
+    try:
+        stored = sink.url.replace('http://', 'http://operator:ghp_FROM_A_HELPER@')
+        cfg, _store = _helper_config(tmp_path, stored)
+        monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(cfg))
+        _configure(client, 'https://github.com/operator/config.git')
+        client.post('/api/backup/git/test', json={'repo_url': sink.url + '/other.git'}, headers=HDR)
+        assert sink.seen == [], (
+            'git fell back to a credential helper on the machine and replayed a stored token to a '
+            'repository the configured token was never scoped to: %r' % sink.seen)
+    finally:
+        sink.close()
+
+
+def test_a_token_is_not_written_into_a_credential_helper(client, tmp_path, monkeypatch):
+    sink = _Sink()
+    try:
+        cfg, store = _helper_config(tmp_path)
+        monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(cfg))
+        _configure(client, sink.url + '/config.git')
+        client.post('/api/backup/git/test', json={}, headers=HDR)
+        assert sink.seen, 'testing the configured repo must still authenticate'
+        assert not store.exists() or 'ghp_' not in store.read_text(), \
+            'the git token was saved into the machine credential store, outside Traefik Manager'
+    finally:
+        sink.close()
+
+
+def test_both_git_runners_reset_credential_helpers():
+    with open(os.path.join(ROOT, 'core', 'git.py'), encoding='utf-8') as fh:
+        host = fh.read()
+    assert "'-c', 'credential.helper='" in host
+    with open(os.path.join(ROOT, 'agent', 'handlers.go'), encoding='utf-8') as fh:
+        agent = fh.read()
+    body = agent[agent.index('func (a *App) gitRun('):agent.index('func (a *App) gitEnsureRepo(')]
+    assert '"credential.helper="' in body, 'the agent must not drift from the host on this'

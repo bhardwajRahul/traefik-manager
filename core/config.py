@@ -1,13 +1,16 @@
+import copy
 import errno
+import hashlib
 import os
 import re
 import shutil
 import threading
 from io import StringIO
+from urllib.parse import urlsplit
 
 from ruamel.yaml import YAML
 
-from core import env
+from core import env, locks
 from core.env import logger
 
 
@@ -40,6 +43,44 @@ yaml = ThreadLocalYAML()
 yaml_safe = ThreadLocalYAML(typ='safe')
 
 
+_parsed_cache = {}
+_parsed_cache_lock = threading.Lock()
+
+
+def read_for_cache(path):
+    try:
+        with open(path, 'rb') as fh:
+            blob = fh.read()
+    except OSError:
+        return None, None
+    return blob, hashlib.blake2b(blob, digest_size=16).digest()
+
+
+def cached_parse(name, digest):
+    if digest is None:
+        return None
+    with _parsed_cache_lock:
+        hit = _parsed_cache.get(name)
+    if hit is None or hit[0] != digest:
+        return None
+    return copy.deepcopy(hit[1])
+
+
+def store_parse(name, digest, value):
+    if digest is not None:
+        with _parsed_cache_lock:
+            _parsed_cache[name] = (digest, copy.deepcopy(value))
+    return value
+
+
+def forget_parse(name=None):
+    with _parsed_cache_lock:
+        if name is None:
+            _parsed_cache.clear()
+        else:
+            _parsed_cache.pop(name, None)
+
+
 _INPLACE_PATHS = set()
 
 
@@ -54,7 +95,8 @@ def _replace_or_copy(tmp: str, path: str):
         if path not in _INPLACE_PATHS:
             _INPLACE_PATHS.add(path)
             logger.info(f"{path} is a bind-mounted file, writing through it in place")
-        shutil.copyfile(tmp, path)
+        with locks.file_lock(path):
+            shutil.copyfile(tmp, path)
 
 
 def safe_file_path(path: str) -> str:
@@ -98,6 +140,52 @@ def readable_config_path(path: str) -> str:
     return ''
 
 
+_APP_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CODE_DIRS   = ('core', 'templates', 'static', 'agent', 'scripts', 'tests', '.git')
+_KERNEL_DIRS = ('/proc', '/sys', '/dev')
+
+
+def _inside(real: str, base: str) -> bool:
+    return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _settings_part_problem(kind: str, part: str) -> str:
+    real = os.path.realpath(part)
+    for base in _KERNEL_DIRS:
+        if _inside(real, base):
+            return f'{part} is inside {base}'
+    config_dir = os.path.realpath(env.CONFIG_DIR)
+    if (env.is_own_state(real)
+            or real in (os.path.realpath(env.SECRET_KEY_PATH), os.path.realpath(env.OTP_KEY_PATH))
+            or (os.path.dirname(real) == config_dir and os.path.basename(real).startswith('.'))):
+        return f"{part} is one of Traefik Manager's own files"
+    app_dir = os.path.realpath(_APP_DIR)
+    if (real == app_dir or any(_inside(real, os.path.join(app_dir, d)) for d in _CODE_DIRS)
+            or (os.path.dirname(real) == app_dir and real.endswith('.py'))):
+        return f"{part} is part of Traefik Manager's code"
+    if kind == 'static':
+        if os.path.splitext(real)[1].lower() not in ('.yml', '.yaml', '.toml'):
+            return f'{part} is not a .yml, .yaml or .toml file'
+        if not os.path.isfile(real):
+            return f'{part} is not an existing file'
+    elif kind == 'acme':
+        if not os.path.isdir(real) and not real.lower().endswith('.json'):
+            return f'{part} is not a .json file or a directory'
+    elif os.path.isdir(real):
+        return f'{part} is a directory, not a file'
+    return ''
+
+
+def settings_path_problem(kind: str, path: str) -> str:
+    raw   = str(path or '').strip()
+    parts = [p.strip() for p in raw.split(',') if p.strip()] if kind == 'acme' else ([raw] if raw else [])
+    for part in parts:
+        problem = _settings_part_problem(kind, part)
+        if problem:
+            return problem
+    return ''
+
+
 def is_safe_path(path: str) -> bool:
     if not env.ACTIVE_CONFIG_DIR:
         return False
@@ -130,6 +218,21 @@ def safe_api_url(url: str) -> str:
         return url
     logger.warning(f"Blocked unsafe API URL: {url!r}")
     return ''
+
+
+def same_api_origin(a: str, b: str) -> bool:
+    try:
+        left, right = urlsplit(str(a or '').strip()), urlsplit(str(b or '').strip())
+        left_port, right_port = left.port, right.port
+    except ValueError:
+        return False
+    if not (left.scheme and left.hostname and right.scheme and right.hostname):
+        return False
+    defaults = {'http': 80, 'https': 443}
+    return (left.scheme.lower() == right.scheme.lower()
+            and left.hostname.lower() == right.hostname.lower()
+            and (left_port or defaults.get(left.scheme.lower())) == (right_port or defaults.get(right.scheme.lower()))
+            and left.path.rstrip('/') == right.path.rstrip('/'))
 
 
 def sanitize_go_templates(raw):
@@ -212,6 +315,31 @@ def save_config(data, path=None):
         except OSError:
             pass
     logger.info(f"Configuration saved: {path}")
+
+
+_RULE_HOST_RE = re.compile(r'(!?)\s*Host\(`([^`]+)`\)')
+
+_RULE_HOST_ANY_RE = re.compile(
+    r'(!?)\s*\b(?:Host|HostSNI)\(\s*((?:(?:`[^`]*`|"(?:[^"\\]|\\.)*")\s*,?\s*)+)\)', re.IGNORECASE)
+_RULE_VALUE_RE  = re.compile(r'`([^`]*)`|"((?:[^"\\]|\\.)*)"')
+_RULE_REGEXP_RE = re.compile(r'\b(?:HostRegexp|HostSNIRegexp)\s*\(', re.IGNORECASE)
+
+
+def rule_hosts(rule) -> list:
+    return [m.group(2) for m in _RULE_HOST_RE.finditer(str(rule or '')) if m.group(1) != '!']
+
+
+def rule_host_patterns(rule) -> tuple:
+    text = str(rule or '')
+    hosts = []
+    for match in _RULE_HOST_ANY_RE.finditer(text):
+        if match.group(1) == '!':
+            continue
+        for backtick, quoted in _RULE_VALUE_RE.findall(match.group(2)):
+            value = (backtick or quoted).replace('\\"', '"').strip()
+            if value:
+                hosts.append(value)
+    return hosts, bool(_RULE_REGEXP_RE.search(text))
 
 
 def svc_key(name):

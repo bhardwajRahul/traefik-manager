@@ -278,3 +278,69 @@ def test_the_check_is_registered_with_the_monitor(app_module):
     from core import monitor
     names = [name for name, _i, _fn in monitor._checks]
     assert 'routes' in names
+
+
+def test_a_negated_host_is_not_the_host_we_check(mon):
+    from core import config as cfg
+    assert cfg.rule_hosts('Host(`a.example.com`) && !Host(`b.example.com`)') == ['a.example.com']
+    assert cfg.rule_hosts('!Host(`b.example.com`) && Host(`a.example.com`)') == ['a.example.com']
+    assert cfg.rule_hosts('! Host(`b.example.com`)') == []
+    assert cfg.rule_hosts('Host(`a.example.com`) || Host(`c.example.com`)') == ['a.example.com', 'c.example.com']
+    probe = _Probe()
+    app = dict(_app('x'), rule='!Host(`nope.example.com`) && Host(`real.example.com`)')
+    rh.check(_host([app]), now=0, probe=probe, settings=ON)
+    assert [u for u, _f in probe.calls] == ['https://real.example.com'], probe.calls
+
+
+def _many(count, prefix='r'):
+    return [_app(f'{prefix}{i:02d}', host=f'{prefix}{i:02d}.example.com') for i in range(count)]
+
+
+def test_many_routes_going_down_together_raise_one_summary(mon):
+    apps = _many(20)
+    rh.check(_host(apps), now=0, probe=_Probe(ok=False), settings=ON)
+    raised = rh.check(_host(apps), now=300, probe=_Probe(ok=False), settings=ON)
+    assert [(t, c) for t, _m, c in raised] == [('error', 'traefik')], raised
+    assert raised[0][1] == ('20 routes are unreachable: r00, r01, r02 and 17 more, '
+                            'check that Traefik Manager can reach them')
+    assert all(_state(mon, a['id'])['state'] == 'down' for a in apps)
+
+
+def test_a_few_routes_going_down_are_still_reported_one_by_one(mon):
+    apps = _many(rh.ROUTE_EVENT_MAX)
+    rh.check(_host(apps), now=0, probe=_Probe(ok=False), settings=ON)
+    raised = rh.check(_host(apps), now=300, probe=_Probe(ok=False), settings=ON)
+    assert len(raised) == rh.ROUTE_EVENT_MAX
+    assert raised[0][1] == 'Route r00 is unreachable (The proxy answered 502, the backend is not reachable)'
+
+
+def test_mass_recovery_is_one_summary_and_only_once(mon):
+    apps = _many(8)
+    rh.check(_host(apps), now=0, probe=_Probe(ok=False), settings=ON)
+    rh.check(_host(apps), now=300, probe=_Probe(ok=False), settings=ON)
+    back = rh.check(_host(apps), now=600, probe=_Probe(ok=True), settings=ON)
+    assert [(t, m) for t, m, _c in back] == [('success', '8 routes are reachable again: r00, r01, r02 and 5 more')]
+    assert rh.check(_host(apps), now=900, probe=_Probe(ok=True), settings=ON) == []
+
+
+def test_summaries_are_per_server(mon, monkeypatch):
+    monkeypatch.setattr(mon, '_agent_servers', lambda: [('a1', 'VPS One', {'id': 'a1', 'name': 'VPS One'})])
+    host_apps, agent_apps = _many(7, 'h'), _many(6, 'a')
+    sources = lambda: [('host', '', host_apps, {'http': []}), ('a1', 'VPS One', agent_apps, {'http': []})]
+    rh.check(sources, now=0, probe=_Probe(ok=False), settings=ON)
+    raised = rh.check(sources, now=300, probe=_Probe(ok=False), settings=ON)
+    assert [m.split(':')[0] for _t, m, _c in raised] == ['7 routes are unreachable', 'VPS One'], raised
+    assert raised[1][1].startswith('VPS One: 6 routes are unreachable: a00, a01, a02 and 3 more')
+
+
+def test_the_reachability_hint_needs_every_checked_route_down(mon):
+    down, up = _many(6, 'd'), _many(2, 'u')
+
+    class _Mixed(_Probe):
+        def __call__(self, url, fallback=''):
+            self.ok = not url.startswith('https://d')
+            return super().__call__(url, fallback)
+
+    rh.check(_host(down + up), now=0, probe=_Mixed(), settings=ON)
+    raised = rh.check(_host(down + up), now=300, probe=_Mixed(), settings=ON)
+    assert [m for _t, m, _c in raised] == ['6 routes are unreachable: d00, d01, d02 and 3 more']

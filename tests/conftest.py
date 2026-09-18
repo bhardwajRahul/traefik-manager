@@ -35,6 +35,13 @@ os.environ["CONFIG_PATHS"] = str(DYNAMIC_PATH)
 os.environ["BACKUP_DIR"] = str(BACKUP_DIR)
 os.environ["TRAEFIK_API_URL"] = "http://traefik.invalid:8080"
 os.environ["STATIC_CONFIG_PATH"] = str(STATIC_PATH)
+_GIT_CONFIG = _TMP / "gitconfig"
+_GIT_CONFIG.write_text(
+    "[user]\n\tname = Traefik Manager Tests\n\temail = tests@localhost\n"
+    "[init]\n\tdefaultBranch = main\n"
+)
+os.environ["GIT_CONFIG_GLOBAL"] = str(_GIT_CONFIG)
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 import core.monitor as _tm_monitor
 
 if not hasattr(_tm_monitor, 'real_start'):
@@ -61,6 +68,8 @@ def _reset_rate_limits():
         _app.limiter.reset()
     except Exception:
         pass
+    from core import auth as _auth_mod
+    _auth_mod.reset_otp_attempts()
 
 
 def _reset_settings():
@@ -74,6 +83,10 @@ def _reset_settings():
         visible_tabs=s["visible_tabs"],
         disabled_routes={},
         managed_middlewares={},
+        must_change_password=False,
+        setup_password_reset=False,
+        session_epoch=0,
+        admin_password_fp='',
     )
 
 

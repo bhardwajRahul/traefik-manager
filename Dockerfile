@@ -74,6 +74,12 @@ RUN curl -sL "https://registry.npmjs.org/@fontsource/jetbrains-mono/-/jetbrains-
     && cp /tmp/package/files/* /app/static/vendor/fonts/jetbrains-mono/ \
     && rm -rf /tmp/package
 
+RUN curl -sL "https://registry.npmjs.org/country-flag-emoji-polyfill/-/country-flag-emoji-polyfill-0.1.10.tgz" \
+    | tar -xz -C /tmp \
+    && cp /tmp/package/dist/TwemojiCountryFlags.woff2 /app/static/vendor/fonts/ \
+    && cp /tmp/package/LICENSE.md /app/static/vendor/fonts/TwemojiCountryFlags-LICENSE.md \
+    && rm -rf /tmp/package
+
 RUN tailwindcss -c /app/tailwind.config.js \
     -i /app/static/css/tailwind.input.css \
     -o /app/static/css/tailwind.css --minify
@@ -89,4 +95,4 @@ ENV HOME=/tmp
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:5000/ || exit 1
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--log-level", "info", "app:app"]
+CMD ["gunicorn", "--config", "/app/gunicorn.conf.py", "app:app"]

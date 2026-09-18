@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -142,14 +143,14 @@ func (a *App) traefikFetchProto(ctx context.Context, traefikPath string) (json.R
 			if i == 0 {
 				return json.RawMessage("[]"), err
 			}
-			break
+			return json.RawMessage("[]"), fmt.Errorf("page %d of %s: %w", page, traefikPath, err)
 		}
 		var chunk []json.RawMessage
 		if err := json.Unmarshal(body, &chunk); err != nil {
 			if i == 0 {
 				return body, nil
 			}
-			break
+			return json.RawMessage("[]"), fmt.Errorf("page %d of %s: %w", page, traefikPath, err)
 		}
 		all = append(all, chunk...)
 		if len(chunk) == 0 || next <= page {
@@ -170,9 +171,16 @@ func (a *App) routersHandler(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "traefik unavailable at "+a.cfg.TraefikAPIURL+": "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	tcpR, _ := a.traefikFetchProto(r.Context(), "/api/tcp/routers")
-	udpR, _ := a.traefikFetchProto(r.Context(), "/api/udp/routers")
-	jsonOK(w, map[string]json.RawMessage{"http": httpR, "tcp": tcpR, "udp": udpR})
+	tcpR, tcpErr := a.traefikFetchProto(r.Context(), "/api/tcp/routers")
+	udpR, udpErr := a.traefikFetchProto(r.Context(), "/api/udp/routers")
+	out := map[string]any{"http": httpR, "tcp": tcpR, "udp": udpR, "complete": tcpErr == nil && udpErr == nil}
+	if tcpErr != nil {
+		out["tcp_error"] = tcpErr.Error()
+	}
+	if udpErr != nil {
+		out["udp_error"] = udpErr.Error()
+	}
+	jsonOK(w, out)
 }
 
 func (a *App) servicesHandler(w http.ResponseWriter, r *http.Request) {
@@ -249,7 +257,7 @@ func (a *App) configsWriteHandler(w http.ResponseWriter, r *http.Request) {
 	info, err := os.Stat(cfgPath)
 	var targetPath string
 	if err == nil && info.IsDir() {
-		if body.Name == "" || strings.Contains(body.Name, "/") || strings.Contains(body.Name, "..") {
+		if _, ok := safeBaseName(body.Name); !ok {
 			jsonError(w, "invalid file name", http.StatusBadRequest)
 			return
 		}
@@ -257,7 +265,9 @@ func (a *App) configsWriteHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		targetPath = cfgPath
 	}
-	if err := a.createFileBak(targetPath, body.Name); err != nil {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	if err := a.createFileBak(targetPath, filepath.Base(targetPath)); err != nil {
 		a.failuref("backup", "pre-write backup of %s failed: %v", targetPath, err)
 		jsonError(w, "backup failed, nothing was written: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -277,9 +287,21 @@ func (a *App) configsWriteHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func atomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
+	}
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp, 0o644)
+	}
+	if werr != nil {
+		os.Remove(tmp)
+		return werr
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
@@ -602,37 +624,30 @@ const (
 	csMaxPages = 200
 )
 
-func (a *App) crowdsecDecisionsHandler(w http.ResponseWriter, r *http.Request) {
-	if a.cfg.CrowdSecLAPIURL == "" {
-		jsonError(w, "CROWDSEC_LAPI_URL not configured", http.StatusNotFound)
-		return
-	}
+func (a *App) csActiveDecisions(ctx context.Context, forceFull bool) ([]json.RawMessage, string, error) {
 	now := time.Now().UTC()
-	all := []json.RawMessage{}
-	cursor := int64(0)
 
 	if csStreamable {
-		rows, _, err := a.csDecisionsStream(r.Context(), r.URL.Query().Get("full") == "1")
+		rows, mode, err := a.csDecisionsStream(ctx, forceFull)
 		if err == nil {
-			a.writeActiveDecisions(w, rows, now)
-			return
+			return csFilterActive(rows, now), csStaleNoteFromMode(mode), nil
 		}
 		if strings.Contains(err.Error(), "LAPI 404") || strings.Contains(err.Error(), "LAPI 405") {
 			log.Printf("crowdsec: LAPI has no /v1/decisions/stream, falling back to the paged walk")
 			csStreamable = false
 		} else {
-			jsonError(w, "crowdsec unavailable: "+err.Error(), http.StatusBadGateway)
-			return
+			return nil, "", err
 		}
 	}
 
+	all := []json.RawMessage{}
+	cursor := int64(0)
 	for page := 0; page < csMaxPages; page++ {
 		path := fmt.Sprintf("/v1/decisions?limit=%d&id_gt=%d", csPageSize, cursor)
-		chunk, err := a.csPageJSON(r.Context(), path, false)
+		chunk, err := a.csPageJSON(ctx, path, false)
 		if err != nil {
 			if page == 0 {
-				jsonError(w, "crowdsec unavailable: "+err.Error(), http.StatusBadGateway)
-				return
+				return nil, "", err
 			}
 			break
 		}
@@ -662,9 +677,159 @@ func (a *App) crowdsecDecisionsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		cursor = maxID
 	}
+	return all, "", nil
+}
 
+func (a *App) crowdsecDecisionsHandler(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.CrowdSecLAPIURL == "" {
+		jsonError(w, "CROWDSEC_LAPI_URL not configured", http.StatusNotFound)
+		return
+	}
+	rows, staleNote, err := a.csActiveDecisions(r.Context(), r.URL.Query().Get("full") == "1")
+	if err != nil {
+		jsonError(w, "crowdsec unavailable: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(all)
+	if staleNote != "" {
+		w.Header().Set("X-CS-Stale", staleNote)
+	}
+	json.NewEncoder(w).Encode(rows)
+}
+
+func (a *App) crowdsecDecisionsSearchHandler(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.CrowdSecLAPIURL == "" {
+		jsonError(w, "CROWDSEC_LAPI_URL not configured", http.StatusNotFound)
+		return
+	}
+	rows, staleNote, err := a.csActiveDecisions(r.Context(), false)
+	if err != nil {
+		jsonError(w, "crowdsec unavailable: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	if staleNote != "" {
+		w.Header().Set("X-CS-Stale", staleNote)
+	}
+
+	q := r.URL.Query()
+	page := 1
+	if n, perr := strconv.Atoi(q.Get("page")); perr == nil && n >= 1 {
+		page = n
+	}
+	per := 20
+	if n, perr := strconv.Atoi(q.Get("per")); perr == nil && n >= 1 && n <= 200 {
+		per = n
+	}
+
+	originFilter := strings.ToLower(strings.TrimSpace(q.Get("origin")))
+	typeFilter := strings.ToLower(strings.TrimSpace(q.Get("type")))
+	ipFilter := strings.TrimSpace(q.Get("ip"))
+	scenarioFilter := strings.TrimSpace(q.Get("scenario"))
+	term := strings.ToLower(strings.TrimSpace(q.Get("q")))
+
+	parsed := make([]csSearchRow, 0, len(rows))
+	for _, raw := range rows {
+		var d struct {
+			ID       int64  `json:"id"`
+			Origin   string `json:"origin"`
+			Type     string `json:"type"`
+			Value    string `json:"value"`
+			Scope    string `json:"scope"`
+			Scenario string `json:"scenario"`
+		}
+		if json.Unmarshal(raw, &d) != nil {
+			continue
+		}
+		originKey := strings.ToLower(strings.TrimSpace(d.Origin))
+		parsed = append(parsed, csSearchRow{
+			raw: raw, id: d.ID, origin: originKey, typ: strings.ToLower(d.Type),
+			value: d.Value, scope: d.Scope, scenario: d.Scenario,
+			own: originKey != "capi" && originKey != "lists",
+		})
+	}
+
+	matchOrigin := func(d csSearchRow) bool {
+		switch originFilter {
+		case "":
+			return true
+		case "subscribed":
+			return d.origin == "capi" || d.origin == "lists"
+		case "own":
+			return d.own
+		case "byhand":
+			return d.origin == "cscli" || d.origin == "manual"
+		default:
+			return d.origin == originFilter
+		}
+	}
+	matchType := func(d csSearchRow) bool { return typeFilter == "" || d.typ == typeFilter }
+	matchIP := func(d csSearchRow) bool { return ipFilter == "" || d.value == ipFilter }
+	matchScenario := func(d csSearchRow) bool { return scenarioFilter == "" || d.scenario == scenarioFilter }
+	matchQ := func(d csSearchRow) bool {
+		if term == "" {
+			return true
+		}
+		hay := strings.ToLower(d.value + " " + d.scenario + " " + d.origin + " " + d.scope + " " + d.typ)
+		return strings.Contains(hay, term)
+	}
+
+	var filtered []csSearchRow
+	facetOrigin, facetType := 0, 0
+	for _, d := range parsed {
+		if matchOrigin(d) && matchType(d) && matchIP(d) && matchScenario(d) && matchQ(d) {
+			filtered = append(filtered, d)
+		}
+		if matchOrigin(d) && matchQ(d) {
+			facetOrigin++
+		}
+		if matchType(d) && matchQ(d) {
+			facetType++
+		}
+	}
+
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].own != filtered[j].own {
+			return filtered[i].own
+		}
+		return filtered[i].id > filtered[j].id
+	})
+
+	total := len(filtered)
+	pages := 1
+	if total > 0 {
+		pages = (total + per - 1) / per
+	}
+	if page > pages {
+		page = pages
+	}
+	start := (page - 1) * per
+	if start > total {
+		start = total
+	}
+	end := start + per
+	if end > total {
+		end = total
+	}
+	outRows := make([]json.RawMessage, 0, end-start)
+	for _, d := range filtered[start:end] {
+		outRows = append(outRows, d.raw)
+	}
+
+	jsonOK(w, map[string]any{
+		"rows": outRows, "total": total, "page": page, "pages": pages, "per": per,
+		"facet_totals": map[string]any{"origin": facetOrigin, "type": facetType},
+	})
+}
+
+type csSearchRow struct {
+	raw      json.RawMessage
+	id       int64
+	origin   string
+	typ      string
+	value    string
+	scope    string
+	scenario string
+	own      bool
 }
 
 func (a *App) crowdsecAlertsHandler(w http.ResponseWriter, r *http.Request) {
@@ -678,8 +843,8 @@ func (a *App) crowdsecAlertsHandler(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	chunk, err := a.csPageJSON(r.Context(),
-		fmt.Sprintf("/v1/alerts?limit=%d&with_decisions=false", limit), true)
+	forceFull := r.URL.Query().Get("full") == "1"
+	chunk, _, _, err := a.csAlerts(r.Context(), limit, forceFull)
 	if err != nil {
 		jsonError(w, "crowdsec unavailable: "+err.Error(), http.StatusBadGateway)
 		return
@@ -769,6 +934,7 @@ func (a *App) crowdsecAddDecisionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	csCacheReset()
+	csAlertCacheReset()
 	jsonOK(w, map[string]any{"ok": true})
 }
 
@@ -792,22 +958,41 @@ func (a *App) backupDir() string {
 	return filepath.Join(a.cfg.BackupDir, "backups")
 }
 
+func safeBaseName(name string) (string, bool) {
+	if name == "" || name == "." || name == ".." {
+		return "", false
+	}
+	if strings.ContainsAny(name, "/\\\x00") || strings.Contains(name, "..") {
+		return "", false
+	}
+	if filepath.Base(name) != name {
+		return "", false
+	}
+	return name, true
+}
+
 func (a *App) createFileBak(targetPath, name string) error {
 	data, err := os.ReadFile(targetPath)
 	if err != nil {
 		return nil
 	}
-	dir := a.backupDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
 	base := name
 	if base == "" {
 		base = filepath.Base(targetPath)
 	}
+	if _, ok := safeBaseName(base); !ok {
+		return fmt.Errorf("unsafe backup name %q", base)
+	}
+	dir := a.backupDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	ts := time.Now().UTC().Format("20060102_150405")
-	bakName := base + "." + ts + ".bak"
-	if err := os.WriteFile(filepath.Join(dir, bakName), data, 0o644); err != nil {
+	dest := filepath.Join(dir, base+"."+ts+".bak")
+	if rel, err := filepath.Rel(dir, dest); err != nil || strings.ContainsRune(rel, filepath.Separator) {
+		return fmt.Errorf("unsafe backup name %q", base)
+	}
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
 		return err
 	}
 	a.pruneBackups(base)
@@ -858,6 +1043,11 @@ func (a *App) backupsListHandler(w http.ResponseWriter, r *http.Request) {
 	if a.cfg.StaticConfigPath != "" {
 		staticBase = filepath.Base(a.cfg.StaticConfigPath)
 	}
+	certNames := map[string]bool{}
+	for path, key := range acmeBackupKeys(acmeJSONPaths(a.cfg.ACMEJSONPath)) {
+		certNames[key] = true
+		certNames[filepath.Base(path)] = true
+	}
 	var list []backup
 	for _, e := range entries {
 		n := e.Name()
@@ -872,7 +1062,9 @@ func (a *App) backupsListHandler(w http.ResponseWriter, r *http.Request) {
 			date = info.ModTime().UTC().Format(time.RFC3339)
 		}
 		kind := "routes"
-		if staticBase != "" && bakBaseName(n) == staticBase {
+		if base := bakBaseName(n); certNames[base] {
+			kind = "certs"
+		} else if staticBase != "" && base == staticBase {
 			kind = "static"
 		}
 		list = append(list, backup{Name: n, Size: size, Date: date, Kind: kind})
@@ -933,7 +1125,7 @@ func (a *App) createBackup() ([]string, error) {
 
 func (a *App) restoreHandler(w http.ResponseWriter, r *http.Request) {
 	filename := strings.TrimPrefix(r.URL.Path, "/api/restore/")
-	if strings.Contains(filename, "/") || strings.Contains(filename, "..") || !strings.HasSuffix(filename, ".bak") {
+	if _, ok := safeBaseName(filename); !ok || !strings.HasSuffix(filename, ".bak") {
 		jsonError(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
@@ -943,12 +1135,20 @@ func (a *App) restoreHandler(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "cannot read backup: "+err.Error(), http.StatusNotFound)
 		return
 	}
-	origName := strings.TrimSuffix(filename, ".bak")
-	if idx := strings.LastIndex(origName, "."); idx >= 0 {
-		candidate := origName[:idx]
-		if len(origName)-idx == 16 {
-			origName = candidate
+	origName := bakBaseName(filename)
+	sameName := 0
+	for path, key := range acmeBackupKeys(acmeJSONPaths(a.cfg.ACMEJSONPath)) {
+		if key == origName {
+			a.restoreCertStore(w, r, path, data)
+			return
 		}
+		if filepath.Base(path) == origName {
+			sameName++
+		}
+	}
+	if sameName > 1 {
+		jsonError(w, origName+" matches more than one certificate store, so this backup cannot be restored safely", http.StatusConflict)
+		return
 	}
 	var dest string
 	if a.cfg.StaticConfigPath != "" && origName == filepath.Base(a.cfg.StaticConfigPath) {
@@ -956,12 +1156,19 @@ func (a *App) restoreHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		cfgPath := a.cfg.ConfigPath
 		info, _ := os.Stat(cfgPath)
-		if info != nil && info.IsDir() {
+		isDir := info != nil && info.IsDir()
+		if !dynamicConfigName(origName) && (isDir || origName != filepath.Base(cfgPath)) {
+			jsonError(w, "no config file matches "+origName, http.StatusBadRequest)
+			return
+		}
+		if isDir {
 			dest = filepath.Join(cfgPath, origName)
 		} else {
 			dest = cfgPath
 		}
 	}
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	if err := a.createFileBak(dest, origName); err != nil {
 		a.failuref("backup", "pre-restore backup of %s failed: %v", dest, err)
 		jsonError(w, "backup failed, nothing was restored: "+err.Error(), http.StatusInternalServerError)
@@ -974,9 +1181,47 @@ func (a *App) restoreHandler(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"ok": true})
 }
 
+func (a *App) restoreCertStore(w http.ResponseWriter, r *http.Request, path string, data []byte) {
+	restart := a.cfg.RestartMethod == "proxy" || a.cfg.RestartMethod == "socket" || a.cfg.RestartMethod == "poison-pill"
+	if !restart {
+		jsonError(w, "no RESTART_METHOD is configured on this agent, and Traefik only reads acme.json at startup", http.StatusForbidden)
+		return
+	}
+	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && !json.Valid(trimmed) {
+		jsonError(w, "this backup is not valid JSON, nothing was restored", http.StatusBadRequest)
+		return
+	}
+	acmeMu.Lock()
+	defer acmeMu.Unlock()
+	if !acmeWritable(path) {
+		jsonError(w, filepath.Base(path)+" is mounted read only on this agent, nothing was restored", http.StatusForbidden)
+		return
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		jsonError(w, "could not read "+filepath.Base(path)+": "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, err := acmeBackupBytes(path, current, a); err != nil {
+		a.failuref("backup", "pre-restore backup of %s failed: %v", path, err)
+		jsonError(w, "backup failed, nothing was restored: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := acmeWriteInPlace(path, data, current); err != nil {
+		status := http.StatusInternalServerError
+		if _, changed := err.(acmeChangedError); changed {
+			status = http.StatusConflict
+		}
+		jsonError(w, "restore failed: "+err.Error(), status)
+		return
+	}
+	restarted := a.restartAfterCertChange(r)
+	jsonOK(w, map[string]any{"ok": true, "restarted": restarted})
+}
+
 func (a *App) backupDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	filename := strings.TrimPrefix(r.URL.Path, "/api/backup/delete/")
-	if strings.Contains(filename, "/") || strings.Contains(filename, "..") || !strings.HasSuffix(filename, ".bak") {
+	if _, ok := safeBaseName(filename); !ok || !strings.HasSuffix(filename, ".bak") {
 		jsonError(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
@@ -1005,6 +1250,26 @@ func validGitURL(u string) bool {
 		strings.HasPrefix(l, "git://")
 }
 
+func ssrfOK(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	ips, err := net.LookupIP(u.Hostname())
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			return false
+		}
+		if v4 := ip.To4(); v4 != nil && v4[0] >= 240 {
+			return false
+		}
+	}
+	return true
+}
+
 func sameGitRemote(a, b string) bool {
 	if a == "" || b == "" {
 		return false
@@ -1028,7 +1293,7 @@ func (a *App) gitAskpassScript() (string, error) {
 }
 
 func (a *App) gitRun(args []string, cwd string, creds ...gitCreds) (string, string, int) {
-	full := append([]string{"-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user", "-c", "protocol.fd.allow=user"}, args...)
+	full := append([]string{"-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=user", "-c", "protocol.fd.allow=user", "-c", "credential.helper="}, args...)
 	cmd := exec.Command("git", full...)
 	if cwd == "" {
 		cwd = a.gitRepoDir()
@@ -1107,29 +1372,6 @@ func (a *App) gitPush(action string, customMsg string) error {
 	dynDir := filepath.Join(repoDir, "dynamic")
 	staticDir := filepath.Join(repoDir, "static")
 
-	copyToDir := func(src, destDir string) {
-		info, err := os.Stat(src)
-		if err != nil {
-			return
-		}
-		if info.IsDir() {
-			entries, _ := os.ReadDir(src)
-			for _, e := range entries {
-				if !e.IsDir() {
-					data, err := os.ReadFile(filepath.Join(src, e.Name()))
-					if err == nil {
-						os.WriteFile(filepath.Join(destDir, e.Name()), data, 0o644)
-					}
-				}
-			}
-		} else {
-			data, err := os.ReadFile(src)
-			if err == nil {
-				os.WriteFile(filepath.Join(destDir, filepath.Base(src)), data, 0o644)
-			}
-		}
-	}
-
 	ts := time.Now().Format("2006-01-02 15:04:05")
 	msg := strings.NewReplacer("{action}", action, "{timestamp}", ts).Replace(a.cfg.GitBackupCommitMsg)
 	if strings.TrimSpace(customMsg) != "" {
@@ -1143,12 +1385,7 @@ func (a *App) gitPush(action string, customMsg string) error {
 		if frc == 0 {
 			a.gitRun([]string{"reset", "--hard", "FETCH_HEAD"}, repoDir)
 		}
-		os.MkdirAll(dynDir, 0o755)
-		os.MkdirAll(staticDir, 0o755)
-		copyToDir(a.cfg.ConfigPath, dynDir)
-		if a.cfg.StaticConfigPath != "" {
-			copyToDir(a.cfg.StaticConfigPath, staticDir)
-		}
+		a.gitStage(dynDir, staticDir)
 		a.gitRun([]string{"add", "-A"}, repoDir)
 		_, _, rc := a.gitRun([]string{"diff", "--cached", "--quiet"}, repoDir)
 		if rc == 0 {
@@ -1170,6 +1407,40 @@ func (a *App) gitPush(action string, customMsg string) error {
 		errOut = strings.ReplaceAll(errOut, token, "***")
 	}
 	return fmt.Errorf("push failed: %s", errOut)
+}
+
+func (a *App) gitStage(dynDir, staticDir string) {
+	os.MkdirAll(dynDir, 0o755)
+	os.MkdirAll(staticDir, 0o755)
+	stores := map[string]bool{}
+	for _, p := range acmeJSONPaths(a.cfg.ACMEJSONPath) {
+		stores[filepath.Base(p)] = true
+	}
+	copyFile := func(src, destDir string) {
+		if data, err := os.ReadFile(src); err == nil {
+			os.WriteFile(filepath.Join(destDir, filepath.Base(src)), data, 0o644)
+		}
+	}
+	if info, err := os.Stat(a.cfg.ConfigPath); err == nil {
+		if info.IsDir() {
+			entries, _ := os.ReadDir(a.cfg.ConfigPath)
+			for _, e := range entries {
+				if !e.IsDir() && dynamicConfigName(e.Name()) && !stores[e.Name()] {
+					copyFile(filepath.Join(a.cfg.ConfigPath, e.Name()), dynDir)
+				}
+			}
+		} else if !stores[filepath.Base(a.cfg.ConfigPath)] {
+			copyFile(a.cfg.ConfigPath, dynDir)
+		}
+	}
+	if a.cfg.StaticConfigPath != "" {
+		copyFile(a.cfg.StaticConfigPath, staticDir)
+	}
+}
+
+func dynamicConfigName(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".toml")
 }
 
 var shaRe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
@@ -1234,6 +1505,10 @@ func (a *App) gitTestHandler(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid repository URL scheme", http.StatusBadRequest)
 		return
 	}
+	if !ssrfOK(repo) {
+		jsonError(w, "target address not allowed", http.StatusBadRequest)
+		return
+	}
 	tmpDir, err := os.MkdirTemp("", "tma-git-test-*")
 	if err != nil {
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -1241,7 +1516,7 @@ func (a *App) gitTestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.RemoveAll(tmpDir)
 	creds := gitCreds{username: username, token: token}
-	_, errOut, rc := a.gitRun([]string{"ls-remote", "--quiet", "--", repo}, tmpDir, creds)
+	_, errOut, rc := a.gitRun([]string{"-c", "http.followRedirects=false", "ls-remote", "--quiet", "--", repo}, tmpDir, creds)
 	if rc != 0 {
 		if token != "" {
 			errOut = strings.ReplaceAll(errOut, token, "***")
@@ -1329,14 +1604,79 @@ func (a *App) gitDiffHandler(w http.ResponseWriter, r *http.Request, sha string)
 	jsonOK(w, map[string]any{"stat": stat, "files": files})
 }
 
+type gitRestoreItem struct {
+	repoPath string
+	dest     string
+}
+
+func (a *App) gitRestoreTargets(repoDir, sha string) ([]gitRestoreItem, bool) {
+	listed, _, rc := a.gitRun([]string{"ls-tree", "-r", "--name-only", sha}, repoDir)
+	if rc != 0 {
+		return nil, false
+	}
+	var paths []string
+	inCommit := map[string]bool{}
+	for _, line := range strings.Split(listed, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			paths = append(paths, line)
+			inCommit[line] = true
+		}
+	}
+	first := func(names ...string) string {
+		for _, name := range names {
+			if inCommit[name] {
+				return name
+			}
+		}
+		return ""
+	}
+	var items []gitRestoreItem
+	cfgPath := a.cfg.ConfigPath
+	if info, err := os.Stat(cfgPath); err == nil && info.IsDir() {
+		for _, p := range paths {
+			if !strings.HasPrefix(p, "dynamic/") {
+				continue
+			}
+			name := strings.TrimPrefix(p, "dynamic/")
+			if _, ok := safeBaseName(name); !ok || !dynamicConfigName(name) {
+				continue
+			}
+			items = append(items, gitRestoreItem{repoPath: p, dest: filepath.Join(cfgPath, name)})
+		}
+	} else if cfgPath != "" {
+		base := filepath.Base(cfgPath)
+		if src := first("dynamic/"+base, base); src != "" {
+			items = append(items, gitRestoreItem{repoPath: src, dest: cfgPath})
+		}
+	}
+	if a.cfg.StaticConfigPath != "" {
+		base := filepath.Base(a.cfg.StaticConfigPath)
+		if src := first("static/"+base, base); src != "" {
+			items = append(items, gitRestoreItem{repoPath: src, dest: a.cfg.StaticConfigPath})
+		}
+	}
+	return items, true
+}
+
 func (a *App) gitRestoreHandler(w http.ResponseWriter, r *http.Request, sha string) {
 	if !shaRe.MatchString(sha) {
 		jsonError(w, "invalid sha", http.StatusBadRequest)
 		return
 	}
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	repoDir := a.gitRepoDir()
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
 		jsonError(w, "git repo not initialized", http.StatusBadRequest)
+		return
+	}
+	items, found := a.gitRestoreTargets(repoDir, sha)
+	if !found {
+		jsonError(w, "commit not found", http.StatusNotFound)
+		return
+	}
+	if len(items) == 0 {
+		jsonError(w, "the commit holds no config files for this agent", http.StatusNotFound)
 		return
 	}
 	if _, err := a.createBackup(); err != nil {
@@ -1344,40 +1684,21 @@ func (a *App) gitRestoreHandler(w http.ResponseWriter, r *http.Request, sha stri
 		jsonError(w, "backup failed, nothing was restored: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	cfgPath := a.cfg.ConfigPath
-	info, _ := os.Stat(cfgPath)
-	isDir := info != nil && info.IsDir()
-	changed, _, rc := a.gitRun([]string{"diff-tree", "--no-commit-id", "-r", "--name-only", sha}, repoDir)
-	if rc != 0 {
-		jsonError(w, "failed to list commit files", http.StatusInternalServerError)
-		return
-	}
-	for _, filename := range strings.Split(changed, "\n") {
-		filename = strings.TrimSpace(filename)
-		if filename == "" {
-			continue
-		}
-		content, _, fileRC := a.gitRun([]string{"show", sha + ":" + filename}, repoDir)
-		if fileRC != 0 {
-			continue
-		}
-		base := filepath.Base(filename)
-		var dest string
-		if isDir {
-			dest = filepath.Join(cfgPath, base)
+	for _, item := range items {
+		content, _, rc := a.gitRun([]string{"show", sha + ":" + item.repoPath}, repoDir)
+		var err error
+		if rc != 0 {
+			err = fmt.Errorf("cannot read it from the commit")
 		} else {
-			dest = cfgPath
+			err = atomicWrite(item.dest, []byte(content))
 		}
-		atomicWrite(dest, []byte(content))
-	}
-	if a.cfg.StaticConfigPath != "" {
-		base := filepath.Base(a.cfg.StaticConfigPath)
-		content, _, rc := a.gitRun([]string{"show", sha + ":static/" + base}, repoDir)
-		if rc == 0 {
-			atomicWrite(a.cfg.StaticConfigPath, []byte(content))
+		if err != nil {
+			a.failuref("git", "restore of %s stopped at %s: %v", sha, item.repoPath, err)
+			jsonError(w, "restore stopped at "+item.repoPath+": "+err.Error()+". A backup was taken before the restore", http.StatusInternalServerError)
+			return
 		}
 	}
-	jsonOK(w, map[string]any{"ok": true})
+	jsonOK(w, map[string]any{"ok": true, "restored": len(items)})
 }
 
 func acmeJSONPaths(raw string) []string {
@@ -1437,6 +1758,10 @@ func (a *App) certsHandler(w http.ResponseWriter, r *http.Request) {
 	for _, path := range paths {
 		source := filepath.Base(path)
 		data, err := os.ReadFile(path)
+		if os.IsPermission(err) {
+			errs = append(errs, "Permission denied reading "+path+". Run the agent as the user that owns it, do not chmod it.")
+			continue
+		}
 		if err != nil {
 			errs = append(errs, "acme.json not found at "+path)
 			continue
@@ -1545,7 +1870,7 @@ func (a *App) routeRawGetHandler(w http.ResponseWriter, r *http.Request, routeID
 
 	var scanPaths []string
 	if cf != "" {
-		if strings.Contains(cf, "/") || strings.Contains(cf, "..") {
+		if _, ok := safeBaseName(cf); !ok {
 			jsonError(w, "invalid config file", http.StatusBadRequest)
 			return
 		}
@@ -1618,9 +1943,12 @@ func (a *App) routeRawSaveHandler(w http.ResponseWriter, r *http.Request, routeI
 		return
 	}
 
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+
 	var targetPath string
 	if cf != "" {
-		if strings.Contains(cf, "/") || strings.Contains(cf, "..") {
+		if _, ok := safeBaseName(cf); !ok {
 			jsonError(w, "invalid config file", http.StatusBadRequest)
 			return
 		}
@@ -1736,16 +2064,21 @@ func (a *App) routeRawSaveHandler(w http.ResponseWriter, r *http.Request, routeI
 }
 
 func (a *App) logsHandler(w http.ResponseWriter, r *http.Request) {
-	if a.cfg.AccessLogPath == "" {
-		jsonOK(w, map[string]any{"error": "ACCESS_LOG_PATH not configured", "lines": []any{}})
-		return
-	}
 	linesReq := 100
-	if v := r.URL.Query().Get("lines"); v != "" {
-		fmt.Sscanf(v, "%d", &linesReq)
+	if values, present := r.URL.Query()["lines"]; present {
+		n, err := strconv.Atoi(strings.TrimSpace(values[0]))
+		if err != nil || n < 1 {
+			jsonError(w, "Invalid lines parameter", http.StatusBadRequest)
+			return
+		}
+		linesReq = n
 		if linesReq > 1000 {
 			linesReq = 1000
 		}
+	}
+	if a.cfg.AccessLogPath == "" {
+		jsonOK(w, map[string]any{"error": "ACCESS_LOG_PATH not configured", "lines": []any{}})
+		return
 	}
 	f, err := os.Open(a.cfg.AccessLogPath)
 	if err != nil {
@@ -1838,7 +2171,7 @@ func csCacheReset() {
 	csCache.sync = time.Time{}
 }
 
-func (a *App) csDecisionsStream(ctx context.Context, forceFull bool) ([]json.RawMessage, bool, error) {
+func (a *App) csDecisionsStream(ctx context.Context, forceFull bool) ([]json.RawMessage, string, error) {
 	fp := a.csFingerprint()
 	csCache.mu.Lock()
 	defer csCache.mu.Unlock()
@@ -1852,21 +2185,22 @@ func (a *App) csDecisionsStream(ctx context.Context, forceFull bool) ([]json.Raw
 	resp, err := a.csRequest(ctx, http.MethodGet, path, nil, false)
 	if err != nil {
 		if csCache.ready && csCache.fp == fp {
-			return csCacheItems(), true, nil
+			return csCacheItems(), csStaleMode(csCacheDecisionAge(), err), nil
 		}
-		return nil, false, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		lapiErr := fmt.Errorf("LAPI %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		if csCache.ready && csCache.fp == fp && resp.StatusCode >= 500 {
-			return csCacheItems(), true, nil
+			return csCacheItems(), csStaleMode(csCacheDecisionAge(), lapiErr), nil
 		}
-		return nil, false, fmt.Errorf("LAPI %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, "", lapiErr
 	}
 	var payload csStreamPayload
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, false, fmt.Errorf("LAPI 404: stream payload not understood: %w", err)
+		return nil, "", fmt.Errorf("LAPI 404: stream payload not understood: %w", err)
 	}
 	if full {
 		csCache.items = map[int64]json.RawMessage{}
@@ -1884,7 +2218,17 @@ func (a *App) csDecisionsStream(ctx context.Context, forceFull bool) ([]json.Raw
 	csCache.fp = fp
 	csCache.ready = true
 	csCache.sync = time.Now()
-	return csCacheItems(), false, nil
+	if full {
+		return csCacheItems(), "full", nil
+	}
+	return csCacheItems(), "delta", nil
+}
+
+func csCacheDecisionAge() time.Duration {
+	if csCache.sync.IsZero() {
+		return 0
+	}
+	return time.Since(csCache.sync)
 }
 
 func csCacheItems() []json.RawMessage {
@@ -1897,7 +2241,33 @@ func csCacheItems() []json.RawMessage {
 
 var csStreamable = true
 
-func (a *App) writeActiveDecisions(w http.ResponseWriter, rows []json.RawMessage, now time.Time) {
+const csStaleAfter = 15 * time.Minute
+
+func csStaleMode(age time.Duration, err error) string {
+	if age >= csStaleAfter {
+		return fmt.Sprintf("stale:%d:%s", int(age.Seconds()), err.Error())
+	}
+	return "cache"
+}
+
+func csStaleNoteFromMode(mode string) string {
+	if !strings.HasPrefix(mode, "stale:") {
+		return ""
+	}
+	parts := strings.SplitN(mode, ":", 3)
+	if len(parts) != 3 {
+		return "CrowdSec has not answered recently, so these decisions are the last ones read and may be out of date."
+	}
+	return fmt.Sprintf("CrowdSec has not answered for %ss, so these decisions are the last ones read and may be "+
+		"out of date. %s", parts[1], parts[2])
+}
+
+func csTruthy(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+func csFilterActive(rows []json.RawMessage, now time.Time) []json.RawMessage {
 	active := make([]json.RawMessage, 0, len(rows))
 	for _, raw := range rows {
 		var d struct {
@@ -1910,8 +2280,309 @@ func (a *App) writeActiveDecisions(w http.ResponseWriter, rows []json.RawMessage
 		}
 		active = append(active, raw)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(active)
+	return active
+}
+
+type csAlertCacheData struct {
+	mu     sync.Mutex
+	items  map[int64]json.RawMessage
+	fp     string
+	limit  int
+	ready  bool
+	synced time.Time
+}
+
+var csAlertCache = &csAlertCacheData{items: map[int64]json.RawMessage{}}
+
+const csAlertFreshWindow = 5 * time.Second
+
+func csAlertCacheReset() {
+	csAlertCache.mu.Lock()
+	defer csAlertCache.mu.Unlock()
+	csAlertCache.items = map[int64]json.RawMessage{}
+	csAlertCache.fp = ""
+	csAlertCache.limit = 0
+	csAlertCache.ready = false
+	csAlertCache.synced = time.Time{}
+}
+
+func csAlertItems() []json.RawMessage {
+	out := make([]json.RawMessage, 0, len(csAlertCache.items))
+	for _, v := range csAlertCache.items {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return decID(out[i]) > decID(out[j]) })
+	return out
+}
+
+func csAlertTrimToLimit(limit int) {
+	if limit <= 0 || len(csAlertCache.items) <= limit {
+		return
+	}
+	ids := make([]int64, 0, len(csAlertCache.items))
+	for id := range csAlertCache.items {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] > ids[j] })
+	keep := make(map[int64]json.RawMessage, limit)
+	for _, id := range ids[:limit] {
+		keep[id] = csAlertCache.items[id]
+	}
+	csAlertCache.items = keep
+}
+
+func (a *App) csAlerts(ctx context.Context, limit int, forceFull bool) ([]json.RawMessage, string, int, error) {
+	fp := a.csFingerprint()
+	csAlertCache.mu.Lock()
+	defer csAlertCache.mu.Unlock()
+
+	now := time.Now()
+	age := time.Duration(0)
+	if !csAlertCache.synced.IsZero() {
+		age = now.Sub(csAlertCache.synced)
+	}
+	readyForFP := csAlertCache.ready && csAlertCache.fp == fp && csAlertCache.limit == limit
+
+	if !forceFull && readyForFP && age < csAlertFreshWindow {
+		return csAlertItems(), "cache", 200, nil
+	}
+
+	full := forceFull || !readyForFP || age > csStreamResync
+	path := fmt.Sprintf("/v1/alerts?limit=%d&with_decisions=false", limit)
+	if !full {
+		path = fmt.Sprintf("/v1/alerts?since=%ds&limit=%d&with_decisions=false", int(age.Seconds())+60, limit)
+	}
+	resp, err := a.csRequest(ctx, http.MethodGet, path, nil, true)
+	if err != nil {
+		if readyForFP {
+			return csAlertItems(), csStaleMode(age, err), 0, nil
+		}
+		return nil, "", 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		lapiErr := fmt.Errorf("LAPI %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		if readyForFP {
+			return csAlertItems(), csStaleMode(age, lapiErr), resp.StatusCode, nil
+		}
+		return nil, "", resp.StatusCode, lapiErr
+	}
+	var payload []json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		if readyForFP {
+			return csAlertItems(), csStaleMode(age, err), 0, nil
+		}
+		return nil, "", 0, err
+	}
+	if full {
+		csAlertCache.items = map[int64]json.RawMessage{}
+	}
+	for _, raw := range payload {
+		if id := decID(raw); id != 0 {
+			csAlertCache.items[id] = raw
+		}
+	}
+	csAlertTrimToLimit(limit)
+	csAlertCache.fp = fp
+	csAlertCache.limit = limit
+	csAlertCache.ready = true
+	csAlertCache.synced = now
+	if full {
+		return csAlertItems(), "full", 200, nil
+	}
+	return csAlertItems(), "delta", 200, nil
+}
+
+type csDecisionsSummary struct {
+	OK         bool              `json:"ok"`
+	Error      string            `json:"error"`
+	Stale      string            `json:"stale"`
+	Total      int               `json:"total"`
+	Own        int               `json:"own"`
+	Subscribed int               `json:"subscribed"`
+	Wide       int               `json:"wide"`
+	Origins    map[string]int    `json:"origins"`
+	Types      map[string]int    `json:"types"`
+	Rows       []json.RawMessage `json:"rows"`
+	RowsMore   int               `json:"rows_more"`
+}
+
+type csAlertsSummary struct {
+	OK     bool             `json:"ok"`
+	Error  string           `json:"error"`
+	Status int              `json:"status"`
+	Limit  int              `json:"limit"`
+	Capped bool             `json:"capped"`
+	Rows   []map[string]any `json:"rows"`
+}
+
+const csSummaryRowCap = 500
+
+func (a *App) csSummaryDecisions(ctx context.Context, forceFull bool) (csDecisionsSummary, []int64, map[string]bool) {
+	block := csDecisionsSummary{Origins: map[string]int{}, Types: map[string]int{}, Rows: []json.RawMessage{}}
+	rows, staleNote, err := a.csActiveDecisions(ctx, forceFull)
+	if err != nil {
+		block.Error = err.Error()
+		return block, nil, map[string]bool{}
+	}
+	block.OK = true
+	block.Stale = staleNote
+
+	valueSet := map[string]bool{}
+	type ownRow struct {
+		raw json.RawMessage
+		id  int64
+	}
+	var ownRows []ownRow
+	ids := make([]int64, 0, len(rows))
+	for _, raw := range rows {
+		var d struct {
+			ID     int64  `json:"id"`
+			Origin string `json:"origin"`
+			Type   string `json:"type"`
+			Scope  string `json:"scope"`
+			Value  string `json:"value"`
+		}
+		if json.Unmarshal(raw, &d) != nil {
+			continue
+		}
+		block.Total++
+		ids = append(ids, d.ID)
+		originKey := strings.ToLower(strings.TrimSpace(d.Origin))
+		subscribed := originKey == "capi" || originKey == "lists"
+		if subscribed {
+			block.Subscribed++
+		} else {
+			block.Own++
+		}
+		if d.Scope != "Ip" {
+			block.Wide++
+		}
+		if d.Scope == "Ip" || d.Scope == "Range" {
+			valueSet[d.Value] = true
+		}
+		block.Origins[originKey]++
+		block.Types[strings.ToLower(d.Type)]++
+		if !subscribed && originKey != "crowdsec" {
+			ownRows = append(ownRows, ownRow{raw: raw, id: d.ID})
+		}
+	}
+	sort.Slice(ownRows, func(i, j int) bool { return ownRows[i].id > ownRows[j].id })
+	if len(ownRows) > csSummaryRowCap {
+		block.RowsMore = len(ownRows) - csSummaryRowCap
+		ownRows = ownRows[:csSummaryRowCap]
+	}
+	block.Rows = make([]json.RawMessage, 0, len(ownRows))
+	for _, r := range ownRows {
+		block.Rows = append(block.Rows, r.raw)
+	}
+	return block, ids, valueSet
+}
+
+var csAlertTrimKeys = []string{
+	"id", "uuid", "scenario", "scenario_version", "events_count", "capacity",
+	"leakspeed", "simulated", "machine_id", "message", "start_at", "stop_at", "created_at", "source", "meta",
+}
+
+func csTrimAlert(raw json.RawMessage, valueSet map[string]bool, decisionsOK bool) map[string]any {
+	var full map[string]any
+	if json.Unmarshal(raw, &full) != nil {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(csAlertTrimKeys)+1)
+	for _, k := range csAlertTrimKeys {
+		if v, ok := full[k]; ok {
+			out[k] = v
+		}
+	}
+	if decisionsOK {
+		ip := ""
+		if src, ok := full["source"].(map[string]any); ok {
+			if v, ok := src["ip"].(string); ok && v != "" {
+				ip = v
+			} else if v, ok := src["value"].(string); ok {
+				ip = v
+			}
+		}
+		out["handled"] = valueSet[ip]
+	}
+	return out
+}
+
+func (a *App) csSummaryAlerts(ctx context.Context, limit int, forceFull, decisionsOK bool,
+	valueSet map[string]bool) (csAlertsSummary, []int64) {
+	block := csAlertsSummary{Limit: limit, Rows: []map[string]any{}}
+	rows, _, status, err := a.csAlerts(ctx, limit, forceFull)
+	if err != nil {
+		block.Error = err.Error()
+		block.Status = status
+		return block, nil
+	}
+	block.OK = true
+	block.Status = 200
+	block.Capped = limit > 0 && len(rows) >= limit
+	ids := make([]int64, 0, len(rows))
+	block.Rows = make([]map[string]any, 0, len(rows))
+	for _, raw := range rows {
+		ids = append(ids, decID(raw))
+		block.Rows = append(block.Rows, csTrimAlert(raw, valueSet, decisionsOK))
+	}
+	return block, ids
+}
+
+func csSummaryVersion(decisionIDs, alertIDs []int64, decisionsOK, alertsOK bool) string {
+	dCopy := append([]int64(nil), decisionIDs...)
+	sort.Slice(dCopy, func(i, j int) bool { return dCopy[i] < dCopy[j] })
+	aCopy := append([]int64(nil), alertIDs...)
+	sort.Slice(aCopy, func(i, j int) bool { return aCopy[i] < aCopy[j] })
+
+	toCSV := func(ids []int64) string {
+		parts := make([]string, len(ids))
+		for i, id := range ids {
+			parts[i] = strconv.FormatInt(id, 10)
+		}
+		return strings.Join(parts, ",")
+	}
+	dFlag, aFlag := "0", "0"
+	if decisionsOK {
+		dFlag = "1"
+	}
+	if alertsOK {
+		aFlag = "1"
+	}
+	raw := toCSV(dCopy) + "|" + toCSV(aCopy) + "|" + dFlag + aFlag
+	sum := sha1.Sum([]byte(raw))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func (a *App) crowdsecSummaryHandler(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.CrowdSecLAPIURL == "" {
+		jsonError(w, "CROWDSEC_LAPI_URL not configured", http.StatusNotFound)
+		return
+	}
+	q := r.URL.Query()
+	forceFull := csTruthy(q.Get("full"))
+	limit := a.cfg.CrowdSecAlertLimit
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 100000 {
+			limit = n
+		}
+	}
+
+	decisionsBlock, decisionIDs, valueSet := a.csSummaryDecisions(r.Context(), forceFull)
+	alertsBlock, alertIDs := a.csSummaryAlerts(r.Context(), limit, forceFull, decisionsBlock.OK, valueSet)
+	version := csSummaryVersion(decisionIDs, alertIDs, decisionsBlock.OK, alertsBlock.OK)
+
+	if v := strings.TrimSpace(q.Get("version")); v != "" && v == version {
+		jsonOK(w, map[string]any{"version": version, "unchanged": true})
+		return
+	}
+	jsonOK(w, map[string]any{
+		"version":   version,
+		"decisions": decisionsBlock,
+		"alerts":    alertsBlock,
+	})
 }
 
 func bakBaseName(n string) string {
@@ -1920,4 +2591,436 @@ func bakBaseName(n string) string {
 		return base[:idx]
 	}
 	return base
+}
+
+func acmeWritable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	fh, err := os.OpenFile(path, os.O_WRONLY, 0o600)
+	if err != nil {
+		return false
+	}
+	fh.Close()
+	return true
+}
+
+func (a *App) certsStatusHandler(w http.ResponseWriter, r *http.Request) {
+	paths := acmeJSONPaths(a.cfg.ACMEJSONPath)
+	found := []string{}
+	for _, p := range paths {
+		if acmeWritable(p) {
+			found = append(found, p)
+		}
+	}
+	restart := a.cfg.RestartMethod == "proxy" || a.cfg.RestartMethod == "socket" || a.cfg.RestartMethod == "poison-pill"
+	writable := len(paths) > 0 && len(found) == len(paths)
+	reason := ""
+	switch {
+	case len(paths) == 0:
+		reason = "ACME_JSON_PATH is not set on this agent"
+	case !writable:
+		reason = "acme.json is mounted read only on this agent"
+	case !restart:
+		reason = "no RESTART_METHOD is configured on this agent, and Traefik only reads acme.json at startup"
+	}
+	method := ""
+	if restart {
+		method = a.cfg.RestartMethod
+	}
+	jsonOK(w, map[string]any{
+		"available": writable && restart, "writable": writable,
+		"restart_method": method, "reason": reason, "paths": found,
+	})
+}
+
+type certDeleteBody struct {
+	Certs []struct {
+		Resolver string `json:"resolver"`
+		Main     string `json:"main"`
+	} `json:"certs"`
+}
+
+var acmeMu sync.Mutex
+
+const acmeAttempts = 3
+
+type acmeChangedError struct{ name string }
+
+func (e acmeChangedError) Error() string {
+	return e.name + " changed while it was being edited, most likely Traefik renewing a certificate. Nothing was written, try again."
+}
+
+func (a *App) certsDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	var body certDeleteBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Certs) == 0 {
+		jsonError(w, "nothing was selected", http.StatusBadRequest)
+		return
+	}
+	paths := acmeJSONPaths(a.cfg.ACMEJSONPath)
+	if len(paths) == 0 {
+		jsonError(w, "ACME_JSON_PATH is not set on this agent", http.StatusForbidden)
+		return
+	}
+	restart := a.cfg.RestartMethod == "proxy" || a.cfg.RestartMethod == "socket" || a.cfg.RestartMethod == "poison-pill"
+	if !restart {
+		jsonError(w, "no RESTART_METHOD is configured on this agent, and Traefik only reads acme.json at startup", http.StatusForbidden)
+		return
+	}
+	wanted := map[string]bool{}
+	for _, c := range body.Certs {
+		if c.Main != "" {
+			wanted[c.Resolver+"\x00"+c.Main] = true
+		}
+	}
+	acmeMu.Lock()
+	defer acmeMu.Unlock()
+	for _, path := range paths {
+		if !acmeWritable(path) {
+			jsonError(w, filepath.Base(path)+" is mounted read only on this agent, nothing was changed", http.StatusForbidden)
+			return
+		}
+	}
+	type acmePlanned struct {
+		path string
+		raw  []byte
+	}
+	var plans []acmePlanned
+	for _, path := range paths {
+		count, raw, _, err := acmePlan(path, wanted)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if count > 0 {
+			plans = append(plans, acmePlanned{path: path, raw: raw})
+		}
+	}
+	removed := 0
+	saved := ""
+	for _, p := range plans {
+		count, bak, err := acmeApply(p.path, wanted, p.raw, a)
+		if err != nil {
+			if removed > 0 {
+				restarted := a.restartAfterCertChange(r)
+				msg := fmt.Sprintf("removed %d certificate(s), then stopped at %s: %v", removed, filepath.Base(p.path), err)
+				a.failuref("certs", "%s", msg)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": msg, "removed": removed, "partial": true, "backup": filepath.Base(saved), "restarted": restarted})
+				return
+			}
+			status := http.StatusInternalServerError
+			if _, changed := err.(acmeChangedError); changed {
+				status = http.StatusConflict
+			}
+			jsonError(w, err.Error(), status)
+			return
+		}
+		removed += count
+		if bak != "" {
+			saved = bak
+		}
+	}
+	if removed == 0 {
+		jsonError(w, "no matching certificate was found", http.StatusNotFound)
+		return
+	}
+	restarted := a.restartAfterCertChange(r)
+	jsonOK(w, map[string]any{"ok": true, "removed": removed, "backup": filepath.Base(saved), "restarted": restarted})
+}
+
+func acmeRemove(path string, wanted map[string]bool, a *App) (int, string, error) {
+	acmeMu.Lock()
+	defer acmeMu.Unlock()
+	return acmeApply(path, wanted, nil, a)
+}
+
+func acmeApply(path string, wanted map[string]bool, raw []byte, a *App) (int, string, error) {
+	for attempt := 0; attempt < acmeAttempts; attempt++ {
+		if raw == nil {
+			read, err := os.ReadFile(path)
+			if err != nil {
+				return 0, "", fmt.Errorf("could not read %s: %w", filepath.Base(path), err)
+			}
+			raw = read
+		}
+		count, body, err := acmeFilter(path, raw, wanted)
+		if err != nil {
+			return 0, "", err
+		}
+		if count == 0 {
+			return 0, "", nil
+		}
+		bak, err := acmeCommit(path, raw, body, a)
+		if err == nil {
+			return count, bak, nil
+		}
+		if _, changed := err.(acmeChangedError); !changed || attempt == acmeAttempts-1 {
+			return 0, "", err
+		}
+		raw = nil
+	}
+	return 0, "", nil
+}
+
+func acmePlan(path string, wanted map[string]bool) (int, []byte, []byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("could not read %s: %w", filepath.Base(path), err)
+	}
+	count, body, err := acmeFilter(path, raw, wanted)
+	return count, raw, body, err
+}
+
+func acmeFilter(path string, raw []byte, wanted map[string]bool) (int, []byte, error) {
+	var store map[string]json.RawMessage
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if err := json.Unmarshal(raw, &store); err != nil {
+			return 0, nil, fmt.Errorf("%s is not valid JSON, nothing was changed: %w", filepath.Base(path), err)
+		}
+	}
+	removed := 0
+	out := map[string]json.RawMessage{}
+	for name, blob := range store {
+		var section map[string]json.RawMessage
+		if err := json.Unmarshal(blob, &section); err != nil {
+			out[name] = blob
+			continue
+		}
+		key := ""
+		for _, candidate := range []string{"Certificates", "certificates"} {
+			if _, ok := section[candidate]; ok {
+				key = candidate
+				break
+			}
+		}
+		if key == "" {
+			out[name] = blob
+			continue
+		}
+		var entries []json.RawMessage
+		if err := json.Unmarshal(section[key], &entries); err != nil {
+			out[name] = blob
+			continue
+		}
+		kept := []json.RawMessage{}
+		for _, entry := range entries {
+			var probe struct {
+				Domain struct {
+					Main string `json:"main"`
+				} `json:"domain"`
+			}
+			if json.Unmarshal(entry, &probe) == nil && wanted[name+"\x00"+probe.Domain.Main] {
+				removed++
+				continue
+			}
+			kept = append(kept, entry)
+		}
+		encoded, err := json.Marshal(kept)
+		if err != nil {
+			return 0, nil, err
+		}
+		section[key] = encoded
+		merged, err := json.Marshal(section)
+		if err != nil {
+			return 0, nil, err
+		}
+		out[name] = merged
+	}
+	if removed == 0 {
+		return 0, nil, nil
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return 0, nil, err
+	}
+	return removed, data, nil
+}
+
+func acmeCommit(path string, raw, body []byte, a *App) (string, error) {
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("could not read %s: %w", filepath.Base(path), err)
+	}
+	if !bytes.Equal(current, raw) {
+		return "", acmeChangedError{name: filepath.Base(path)}
+	}
+	bak, err := acmeBackupBytes(path, raw, a)
+	if err != nil {
+		return "", err
+	}
+	if err := acmeWriteInPlace(path, body, raw); err != nil {
+		return "", err
+	}
+	return bak, nil
+}
+
+func acmeBackup(path string, a *App) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return acmeBackupBytes(path, raw, a)
+}
+
+func acmeBackupBytes(path string, raw []byte, a *App) (string, error) {
+	dir := a.backupDir()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", err
+	}
+	base := acmeBackupKeys(acmeJSONPaths(a.cfg.ACMEJSONPath))[path]
+	if base == "" {
+		base = filepath.Base(path)
+	}
+	for attempt := 0; attempt < acmeAttempts+2; attempt++ {
+		dest := filepath.Join(dir, base+"."+time.Now().UTC().Format("20060102_150405")+".bak")
+		fh, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if os.IsExist(err) {
+			time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second + 10*time.Millisecond)))
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, werr := fh.Write(raw)
+		serr := fh.Sync()
+		cerr := fh.Close()
+		if werr != nil {
+			return "", werr
+		}
+		if serr != nil {
+			return "", serr
+		}
+		if cerr != nil {
+			return "", cerr
+		}
+		return dest, os.Chmod(dest, 0o600)
+	}
+	return "", fmt.Errorf("could not create a unique backup of %s, nothing was changed", base)
+}
+
+func acmeWriteInPlace(path string, data []byte, restore []byte) error {
+	padded := data
+	if info, err := os.Stat(path); err == nil && info.Size() > int64(len(data)) {
+		padded = append(append([]byte{}, data...), bytes.Repeat([]byte(" "), int(info.Size())-len(data))...)
+	}
+	if err := acmeWriteAll(path, padded, int64(len(data))); err != nil {
+		if restore != nil {
+			if perr := acmeWriteInPlace(path, restore, nil); perr != nil {
+				log.Printf("certs: could not put %s back after a failed write: %v", filepath.Base(path), perr)
+			}
+		}
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("could not read %s back after writing: %w", filepath.Base(path), err)
+	}
+	if bytes.Equal(got, data) {
+		return nil
+	}
+	if trimmed := bytes.TrimSpace(got); len(trimmed) == 0 || json.Valid(trimmed) {
+		return acmeChangedError{name: filepath.Base(path)}
+	}
+	if restore != nil {
+		if perr := acmeWriteInPlace(path, restore, nil); perr != nil {
+			log.Printf("certs: could not put %s back after a failed write: %v", filepath.Base(path), perr)
+		}
+	}
+	return fmt.Errorf("%s did not read back as valid JSON after writing, the previous copy was put back", filepath.Base(path))
+}
+
+func acmeWriteAll(path string, padded []byte, size int64) error {
+	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+	if _, err := fh.Write(padded); err != nil {
+		return err
+	}
+	if err := fh.Sync(); err != nil {
+		return err
+	}
+	if err := fh.Truncate(size); err != nil {
+		return err
+	}
+	return fh.Sync()
+}
+
+func acmeKeyPart(parent string) string {
+	if parent == "" || parent == "." || parent == "/" {
+		return "store"
+	}
+	return strings.Map(func(r rune) rune {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == ' ' || r == '-' {
+			return r
+		}
+		return '-'
+	}, parent)
+}
+
+func acmeQualifiedKey(path, base string) string {
+	return acmeKeyPart(filepath.Base(filepath.Dir(path))) + "-" + base
+}
+
+func acmeBackupKey(path string, all []string) string {
+	base := filepath.Base(path)
+	var same []string
+	seen := map[string]bool{}
+	for _, other := range all {
+		if !seen[other] && filepath.Base(other) == base {
+			same = append(same, other)
+		}
+		seen[other] = true
+	}
+	if len(same) <= 1 {
+		return base
+	}
+	key := acmeQualifiedKey(path, base)
+	for _, other := range same {
+		if other != path && acmeQualifiedKey(other, base) == key {
+			sum := sha256.Sum256([]byte(path))
+			return hex.EncodeToString(sum[:])[:8] + "-" + base
+		}
+	}
+	return key
+}
+
+func acmeBackupKeys(paths []string) map[string]string {
+	keys := map[string]string{}
+	for _, path := range paths {
+		keys[path] = acmeBackupKey(path, paths)
+	}
+	return keys
+}
+
+func (a *App) restartAfterCertChange(r *http.Request) bool {
+	switch a.cfg.RestartMethod {
+	case "poison-pill":
+		if a.cfg.SignalFilePath == "" {
+			return false
+		}
+		return os.WriteFile(a.cfg.SignalFilePath, []byte("restart"), 0o644) == nil
+	case "socket", "proxy":
+		if err := a.dockerPreflight(r.Context()); err != nil {
+			a.failuref("restart", "Traefik restart after a certificate change failed: %v", err)
+			return false
+		}
+		go func() {
+			time.Sleep(400 * time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := a.dockerRestart(ctx); err != nil {
+				a.failuref("restart", "Traefik restart after a certificate change failed: %v", err)
+			}
+		}()
+		return true
+	}
+	return false
 }
